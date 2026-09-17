@@ -1,0 +1,33 @@
+{
+  "generic": {
+    "label": "Generic / no format check",
+    "description": "No expected pattern - only confidence score applies.",
+    "pattern": null,
+    "expected_length": null,
+    "roi_hint": null
+  },
+
+  "date_code": {
+    "label": "Date/Batch Code (tube cap emboss)",
+    "description": "DDMMYY + 4-char alnum batch suffix, e.g. 3108260HB8",
+    "pattern": "^\\d{6}[A-Za-z0-9]{4}$",
+    "expected_length": 10,
+    "roi_hint": "Embossed on the tube cap/shoulder. The knurl/ridge line next to the text has been misread as an extra character before (e.g. OCR read '13108260HB8' - 11 chars - instead of the correct '3108260HB8' - 10 chars - with high confidence). If FORMAT_MISMATCH keeps showing one extra leading/trailing character on this field, narrow the Fixed ROI to exclude the ridge area when you define it."
+  },
+
+  "wo_number": {
+    "label": "Work Order Number",
+    "description": "WO + 6 digits, e.g. WO123456",
+    "pattern": "^WO\\d{6}$",
+    "expected_length": 8,
+    "roi_hint": null
+  },
+
+  "batch_no": {
+    "label": "Batch Number",
+    "description": "8-digit numeric batch number",
+    "pattern": "^\\d{8}$",
+    "expected_length": 8,
+    "roi_hint": null
+  }
+}

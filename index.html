@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>IPC Vision Service - OCR Test Tool</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f4f5f7; color: #1a1a1a; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #666; margin-bottom: 20px; font-size: 13px; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+  .controls { flex: 0 0 280px; }
+  .stage { flex: 1 1 480px; min-width: 320px; }
+  .results { flex: 1 1 380px; min-width: 300px; max-height: 80vh; overflow-y: auto; }
+  button { padding: 8px 14px; margin: 4px 4px 4px 0; border: 1px solid #bbb; border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.primary:hover { background: #1d4ed8; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  video, canvas, img.preview { max-width: 100%; border-radius: 6px; display: block; }
+  #camWrap, #canvasWrap { margin-top: 10px; }
+  .hidden { display: none !important; }
+  .stack { position: relative; display: inline-block; max-width: 100%; }
+  .stack canvas { max-width: 100%; height: auto; }
+  #boxCanvas { position: absolute; top: 0; left: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { color: #555; font-weight: 600; }
+  .conf { font-weight: 600; }
+  .conf.high { color: #16a34a; }
+  .conf.mid { color: #d97706; }
+  .conf.low { color: #dc2626; }
+  .meta { font-size: 12px; color: #666; margin-bottom: 8px; }
+  .status { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  label.field { display: block; font-size: 12px; color: #555; margin: 10px 0 4px; }
+  input[type=text], select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+  .field-desc { font-size: 11px; color: #888; margin-top: 3px; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .badge.ok { background: #dcfce7; color: #15803d; }
+  .badge.low_confidence { background: #fef3c7; color: #b45309; }
+  .badge.format_mismatch { background: #fee2e2; color: #b91c1c; }
+  .badge.format_ok { background: #dcfce7; color: #15803d; }
+  .badge.not_applicable { background: #eee; color: #777; }
+  .roi-notes { margin-top: 12px; padding: 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 12px; color: #78350f; }
+  .roi-notes b { display: block; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<h1>IPC Vision Service — OCR Test Tool</h1>
+<div class="sub">Local prototype only. Upload or capture a document photo, run PaddleOCR, inspect text + confidence + bounding boxes.</div>
+
+<div class="row">
+
+  <div class="panel controls">
+    <label class="field">Backend URL</label>
+    <input type="text" id="backendUrl" value="http://127.0.0.1:8000">
+
+    <label class="field">Field type (for format validation)</label>
+    <select id="fieldTypeSelect"><option value="">Loading...</option></select>
+    <div class="field-desc" id="fieldTypeDesc"></div>
+
+    <label class="field">1. Get an image</label>
+    <button id="btnPickFile">Upload from file</button>
+    <input type="file" id="fileInput" accept="image/*" class="hidden">
+
+    <button id="btnOpenCam">Use camera</button>
+
+    <div id="camWrap" class="hidden">
+      <video id="video" autoplay playsinline width="260"></video>
+      <div>
+        <button id="btnCapture">Capture photo</button>
+        <button id="btnCloseCam">Close camera</button>
+      </div>
+    </div>
+
+    <label class="field">2. Run</label>
+    <button id="btnRunOcr" class="primary" disabled>Run OCR</button>
+    <button id="btnClear">Clear</button>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="panel stage">
+    <div class="meta">Preview (bounding boxes drawn after OCR runs)</div>
+    <div id="stackWrap" class="stack">
+      <canvas id="imgCanvas"></canvas>
+      <canvas id="boxCanvas"></canvas>
+    </div>
+    <div id="emptyStage" style="color:#999; font-size:13px;">No image yet.</div>
+  </div>
+
+  <div class="panel results">
+    <div class="meta" id="resultMeta">Results will appear here after running OCR.</div>
+    <table id="resultTable" class="hidden">
+      <thead><tr><th>#</th><th>Text</th><th>Confidence</th><th>Validation</th><th>Status</th></tr></thead>
+      <tbody id="resultBody"></tbody>
+    </table>
+    <div id="roiNotes" class="roi-notes hidden"></div>
+  </div>
+
+</div>
+
+<script>
+const backendUrlInput = document.getElementById('backendUrl');
+const fileInput = document.getElementById('fileInput');
+const btnPickFile = document.getElementById('btnPickFile');
+const btnOpenCam = document.getElementById('btnOpenCam');
+const btnCloseCam = document.getElementById('btnCloseCam');
+const btnCapture = document.getElementById('btnCapture');
+const btnRunOcr = document.getElementById('btnRunOcr');
+const btnClear = document.getElementById('btnClear');
+const camWrap = document.getElementById('camWrap');
+const video = document.getElementById('video');
+const imgCanvas = document.getElementById('imgCanvas');
+const boxCanvas = document.getElementById('boxCanvas');
+const emptyStage = document.getElementById('emptyStage');
+const statusEl = document.getElementById('status');
+const resultMeta = document.getElementById('resultMeta');
+const resultTable = document.getElementById('resultTable');
+const resultBody = document.getElementById('resultBody');
+const fieldTypeSelect = document.getElementById('fieldTypeSelect');
+const fieldTypeDesc = document.getElementById('fieldTypeDesc');
+const roiNotes = document.getElementById('roiNotes');
+
+let currentStream = null;
+let currentBlob = null;
+let fieldTypesByKey = {};
+
+// --- Load field types from backend (field_patterns.json is the source of truth) ---
+async function loadFieldTypes() {
+  try {
+    const base = backendUrlInput.value.replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/field-types');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const types = await resp.json();
+    fieldTypesByKey = {};
+    fieldTypeSelect.innerHTML = '';
+    types.forEach((t) => {
+      fieldTypesByKey[t.key] = t;
+      const opt = document.createElement('option');
+      opt.value = t.key;
+      opt.textContent = t.label;
+      fieldTypeSelect.appendChild(opt);
+    });
+    updateFieldTypeDesc();
+  } catch (err) {
+    fieldTypeSelect.innerHTML = '<option value="">(failed to load - check backend URL)</option>';
+    fieldTypeDesc.textContent = '';
+  }
+}
+
+function updateFieldTypeDesc() {
+  const t = fieldTypesByKey[fieldTypeSelect.value];
+  fieldTypeDesc.textContent = t && t.description ? t.description : '';
+}
+
+fieldTypeSelect.addEventListener('change', updateFieldTypeDesc);
+loadFieldTypes();
+
+function setStatus(msg, isError) {
+  statusEl.textContent = msg || '';
+  statusEl.style.color = isError ? '#dc2626' : '#444';
+}
+
+function drawImageToCanvas(imgEl) {
+  const w = imgEl.naturalWidth || imgEl.width;
+  const h = imgEl.naturalHeight || imgEl.height;
+  imgCanvas.width = w;
+  imgCanvas.height = h;
+  boxCanvas.width = w;
+  boxCanvas.height = h;
+  const ctx = imgCanvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(imgEl, 0, 0, w, h);
+  boxCanvas.getContext('2d').clearRect(0, 0, w, h);
+  emptyStage.classList.add('hidden');
+  btnRunOcr.disabled = false;
+}
+
+function loadBlobIntoStage(blob) {
+  currentBlob = blob;
+  const url = URL.createObjectURL(blob);
+  const imgEl = new Image();
+  imgEl.onload = () => {
+    drawImageToCanvas(imgEl);
+    URL.revokeObjectURL(url);
+  };
+  imgEl.src = url;
+}
+
+// --- File upload ---
+btnPickFile.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) loadBlobIntoStage(f);
+});
+
+// --- Camera capture ---
+btnOpenCam.addEventListener('click', async () => {
+  try {
+    currentStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+    });
+    video.srcObject = currentStream;
+    camWrap.classList.remove('hidden');
+    setStatus('Camera active.');
+  } catch (err) {
+    setStatus('Camera error: ' + err.message, true);
+  }
+});
+
+btnCloseCam.addEventListener('click', () => stopCamera());
+
+function stopCamera() {
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+  camWrap.classList.add('hidden');
+}
+
+btnCapture.addEventListener('click', () => {
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  if (!w || !h) {
+    setStatus('Camera not ready yet.', true);
+    return;
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  tmp.getContext('2d').drawImage(video, 0, 0, w, h);
+  tmp.toBlob((blob) => {
+    loadBlobIntoStage(blob);
+    stopCamera();
+    setStatus('Photo captured from camera.');
+  }, 'image/jpeg', 0.92);
+});
+
+// --- Run OCR ---
+btnRunOcr.addEventListener('click', async () => {
+  if (!currentBlob) return;
+  btnRunOcr.disabled = true;
+  setStatus('Running OCR...');
+  resultTable.classList.add('hidden');
+  resultMeta.textContent = 'Running OCR...';
+
+  const formData = new FormData();
+  formData.append('file', currentBlob, 'capture.jpg');
+  if (fieldTypeSelect.value) {
+    formData.append('field_type', fieldTypeSelect.value);
+  }
+
+  try {
+    const base = backendUrlInput.value.replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/ocr', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
+    const data = await resp.json();
+    if (data.error) {
+      setStatus(data.error, true);
+      resultMeta.textContent = data.error;
+    } else {
+      renderResults(data);
+      setStatus('Done.');
+    }
+  } catch (err) {
+    setStatus('Request failed: ' + err.message + ' (is the backend running and is the URL correct?)', true);
+    resultMeta.textContent = 'Request failed.';
+  } finally {
+    btnRunOcr.disabled = false;
+  }
+});
+
+function confClass(score) {
+  if (score >= 0.9) return 'high';
+  if (score >= 0.7) return 'mid';
+  return 'low';
+}
+
+function badgeHtml(value) {
+  if (!value) return '';
+  const cls = value.toLowerCase();
+  return `<span class="badge ${cls}">${value}</span>`;
+}
+
+function renderResults(data) {
+  resultMeta.textContent =
+    `${data.detection_count} text region(s) - ${data.processing_time_ms} ms - ${data.image_width}x${data.image_height}px`;
+
+  resultBody.innerHTML = '';
+  const hints = [];
+
+  data.detections.forEach((d, i) => {
+    const tr = document.createElement('tr');
+    let validationCell = badgeHtml(d.validation_status);
+    if (d.validation_status === 'FORMAT_MISMATCH') {
+      validationCell += `<div class="field-desc">expected ${d.expected_length ?? '?'} chars (${escapeHtml(d.expected_pattern || '')}), got ${d.actual_length}</div>`;
+    }
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${escapeHtml(d.text)}</td>
+      <td class="conf ${confClass(d.confidence)}">${(d.confidence * 100).toFixed(1)}%</td>
+      <td>${validationCell}</td>
+      <td>${badgeHtml(d.status)}</td>
+    `;
+    resultBody.appendChild(tr);
+
+    if (d.roi_hint) {
+      hints.push(`#${i + 1} "${d.text}": ${d.roi_hint}`);
+    }
+  });
+  resultTable.classList.remove('hidden');
+
+  if (hints.length) {
+    roiNotes.innerHTML = '<b>ROI review note(s):</b>' + hints.map(h => `<div>${escapeHtml(h)}</div>`).join('');
+    roiNotes.classList.remove('hidden');
+  } else {
+    roiNotes.classList.add('hidden');
+    roiNotes.innerHTML = '';
+  }
+
+  drawBoxes(data.detections);
+}
+
+function drawBoxes(detections) {
+  const ctx = boxCanvas.getContext('2d');
+  ctx.clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+  ctx.lineWidth = Math.max(2, boxCanvas.width / 400);
+  ctx.font = `${Math.max(14, boxCanvas.width / 60)}px sans-serif`;
+
+  detections.forEach((d, i) => {
+    const pts = d.box;
+    if (!pts || !pts.length) return;
+    // Box color reflects the combined status, not raw confidence, so a
+    // confident-but-format-mismatched read (e.g. the tube knurl case) still
+    // shows red instead of looking like a clean pass.
+    const color = d.status === 'FORMAT_MISMATCH' ? '#dc2626'
+      : d.status === 'LOW_CONFIDENCE' ? '#d97706'
+      : '#16a34a';
+
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let p = 1; p < pts.length; p++) ctx.lineTo(pts[p][0], pts[p][1]);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.fillText(String(i + 1), pts[0][0], Math.max(12, pts[0][1] - 4));
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+btnClear.addEventListener('click', () => {
+  currentBlob = null;
+  fileInput.value = '';
+  stopCamera();
+  imgCanvas.getContext('2d').clearRect(0, 0, imgCanvas.width, imgCanvas.height);
+  boxCanvas.getContext('2d').clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+  imgCanvas.width = imgCanvas.height = boxCanvas.width = boxCanvas.height = 0;
+  emptyStage.classList.remove('hidden');
+  btnRunOcr.disabled = true;
+  resultTable.classList.add('hidden');
+  resultMeta.textContent = 'Results will appear here after running OCR.';
+  roiNotes.classList.add('hidden');
+  roiNotes.innerHTML = '';
+  setStatus('');
+});
+</script>
+</body>
+</html>
