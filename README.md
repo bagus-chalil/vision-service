@@ -7,11 +7,19 @@ code** — tidak ada auth, HTTPS, atau request_id/API contract final.
 ## Struktur project
 
 ```
-main.py              FastAPI backend (PaddleOCR + validasi format)
-field_patterns.json  Config regex per field_type (edit manual, no restart needed)
-index.html           Frontend testing (upload/camera + hasil OCR)
-test_ocr.py          Script kecil untuk verifikasi PaddleOCR bisa load
-venv/                Python 3.11 virtualenv
+main.py                       FastAPI backend (PaddleOCR + validasi format)
+tube_emboss_pipeline.py       Sub-pipeline: YOLO tube localize + crimp OCR + format validasi
+field_patterns.json           Config regex per field_type, dipakai /api/ocr (edit manual, no restart)
+emboss_format_patterns.json   Config block-based (day/month/year/batch/mfg_code), dipakai tube emboss pipeline
+index.html                    Frontend testing generic (upload/camera + hasil OCR)
+tube_emboss.html              Frontend testing khusus tube emboss sub-pipeline
+tests/                        Script verifikasi manual (test_ocr.py, test_tube_emboss.py)
+tools/                        Script diagnostic/batch dev-only, bukan bagian dari service
+images/                       Sample foto testing
+models/                       Model weights (YOLO tube detector)
+logs/                         Log runtime (gitignored, regenerated)
+debug_output/                 Crop debug dari tools/ & tests/test_tube_emboss.py (gitignored, regenerated)
+venv/                         Python 3.11 virtualenv
 ```
 
 ## Setup (first time / clone baru)

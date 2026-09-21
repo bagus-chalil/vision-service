@@ -2,13 +2,13 @@
 Batch diagnostic over images/*.jpg using the real tube_emboss_pipeline
 (no server needed - loads PaddleOCR + YOLO directly, same construction as
 main.py). For each image, saves:
-  diagnostic_out/<name>_tube.png   - YOLO tube bbox crop
-  diagnostic_out/<name>_crimp.png  - top-15% crimp crop (what OCR actually sees)
+  debug_output/diagnostic_out/<name>_tube.png   - YOLO tube bbox crop
+  debug_output/diagnostic_out/<name>_crimp.png  - top-15% crimp crop (what OCR actually sees)
 and prints raw_ocr_text / confidence / validation per image, plus a summary
 table at the end so ridge-margin patterns across all photos are visible at
 once (not just the 2 old samples).
 
-Run: venv\\Scripts\\python.exe diagnose_images_folder.py
+Run: venv\\Scripts\\python.exe tools\\diagnose_images_folder.py
 """
 
 import sys
@@ -17,10 +17,12 @@ from pathlib import Path
 import cv2
 from paddleocr import PaddleOCR
 
+ROOT_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT_DIR))
 import tube_emboss_pipeline as pipeline
 
-IMAGES_DIR = Path(__file__).parent / "images"
-OUT_DIR = Path(__file__).parent / "diagnostic_out"
+IMAGES_DIR = ROOT_DIR / "images"
+OUT_DIR = ROOT_DIR / "debug_output" / "diagnostic_out"
 
 
 def main():

@@ -22,3 +22,7 @@ Thumbs.db
 
 # Runtime-generated fallback/training-data logs (not source)
 logs/
+
+# Regenerated diagnostic/debug crops from tools/*.py and tests/test_tube_emboss.py
+# (re-run the script to get them back - never hand-edited, not source)
+debug_output/

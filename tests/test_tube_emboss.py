@@ -5,11 +5,12 @@ Start the server first:
     venv\\Scripts\\uvicorn.exe main:app --reload --port 8000
 
 Then run:
-    venv\\Scripts\\python.exe test_tube_emboss.py C:\\path\\to\\tube_photo.jpg [field_type]
+    venv\\Scripts\\python.exe tests\\test_tube_emboss.py C:\\path\\to\\tube_photo.jpg [field_type]
 
 Prints the JSON response. If debug crops are present in the response, saves
-them next to this script as tube_crop_debug.png / crimp_crop_debug.png so
-you can eyeball whether the YOLO crop and the 15% top-crop landed correctly.
+them to debug_output/ at the project root as tube_crop_debug.png /
+crimp_crop_debug.png so you can eyeball whether the YOLO crop and the 15%
+top-crop landed correctly.
 """
 
 import base64
@@ -59,9 +60,10 @@ def main():
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
     if debug:
-        here = Path(__file__).parent
-        save_debug_crop(debug.get("tube_crop_base64"), here / "tube_crop_debug.png")
-        save_debug_crop(debug.get("crimp_crop_base64"), here / "crimp_crop_debug.png")
+        out_dir = Path(__file__).parent.parent / "debug_output"
+        out_dir.mkdir(exist_ok=True)
+        save_debug_crop(debug.get("tube_crop_base64"), out_dir / "tube_crop_debug.png")
+        save_debug_crop(debug.get("crimp_crop_base64"), out_dir / "crimp_crop_debug.png")
 
 
 if __name__ == "__main__":

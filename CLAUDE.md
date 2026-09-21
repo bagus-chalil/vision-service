@@ -35,14 +35,22 @@ PASS/FAIL.
 Ini **local prototype/testing tool**, bukan Vision Service production. Belum
 ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 
-| File | Isi |
+| File/Folder | Isi |
 |---|---|
-| `main.py` | FastAPI backend, PaddleOCR di-load sekali saat startup |
-| `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`) — dibaca ulang tiap request, edit langsung tanpa restart |
-| `index.html` | Frontend single-file vanilla JS: upload file / camera capture (getUserMedia) / Run OCR / tabel hasil (Validation + Status columns) / bounding box overlay / panel ROI hint |
-| `test_ocr.py` | Script kecil verifikasi PaddleOCR + cv2 bisa load |
+| `main.py` | FastAPI backend, PaddleOCR di-load sekali saat startup. Import `tube_emboss_pipeline` langsung (plain import, bukan package) — file ini harus tetap sejajar (sibling) dengan `tube_emboss_pipeline.py` |
+| `tube_emboss_pipeline.py` | Sub-pipeline khusus emboss tutup tube: YOLO tube localize → crimp crop → OCR dual-pass (raw + sharpened) → `validate_emboss_format()` block-based (day/month/year/batch/mfg_code) |
+| `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`), dipakai `/api/ocr` — dibaca ulang tiap request, edit langsung tanpa restart |
+| `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) khusus tube emboss, dipakai `/api/tube-emboss/*` — juga dibaca ulang tiap request |
+| `index.html` | Frontend single-file vanilla JS generic: upload file / camera capture (getUserMedia) / Run OCR / tabel hasil (Validation + Status columns) / bounding box overlay / panel ROI hint |
+| `tube_emboss.html` | Frontend testing khusus tube emboss sub-pipeline (field_type dari `emboss_format_patterns.json`) |
+| `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
+| `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py`, `diagnose_sharpening_ab.py` — keduanya `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` |
+| `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
+| `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
+| `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
+| `debug_output/` | Crop debug dari `tools/*.py` dan `tests/test_tube_emboss.py` — gitignored, regenerated, jangan commit isinya |
 | `README.md` | Instruksi setup & pemakaian |
-| `.gitignore` | Exclude `venv/`, `__pycache__/`, cache PaddleX, dll |
+| `.gitignore` | Exclude `venv/`, `__pycache__/`, cache PaddleX, `logs/`, `debug_output/`, dll |
 | `venv/` | Python 3.11 venv. Terinstall: `paddleocr==3.7.0`, `paddlepaddle==3.3.1`, `opencv-python==5.0.0.93`, `fastapi==0.141.1`, `uvicorn==0.53.0`, `python-multipart==0.0.32` |
 
 Endpoint `main.py`:
@@ -94,6 +102,15 @@ Endpoint `main.py`:
    sempat commit). `.gitignore` sudah menambahkan `venv/`, `__pycache__/`,
    `.paddlex/`, dll — pastikan `git status` bersih dari isi venv sebelum
    commit pertama.
+7. **`main.py` dan `tube_emboss_pipeline.py` pakai plain `import`, bukan
+   package-relative** (`import tube_emboss_pipeline`, tanpa `from . import`).
+   Ini artinya keduanya HARUS tetap sejajar (sibling) di root — jangan
+   pindahkan salah satunya ke subfolder tanpa refactor jadi proper package.
+   Script di `tools/` (`diagnose_images_folder.py`,
+   `diagnose_sharpening_ab.py`) yang butuh `import tube_emboss_pipeline`
+   walau lokasinya sudah di subfolder, pakai `sys.path.insert(0,
+   str(Path(__file__).parent.parent))` sebelum import — kalau bikin script
+   diagnostic baru di `tools/`, ikuti pola yang sama.
 
 ## Status / progress log
 

@@ -9,7 +9,7 @@ to recognize_crimp_text_dual() (skip the sharpened pass when raw confidence
 is already below GEMINI_FALLBACK_THRESHOLD) - same threshold, read straight
 from tube_emboss_pipeline so this never drifts out of sync with production.
 
-Run: venv\\Scripts\\python.exe diagnose_sharpening_ab.py
+Run: venv\\Scripts\\python.exe tools\\diagnose_sharpening_ab.py
 """
 
 import sys
@@ -18,10 +18,12 @@ from pathlib import Path
 import cv2
 from paddleocr import PaddleOCR
 
+ROOT_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT_DIR))
 import tube_emboss_pipeline as pipeline
 
-IMAGES_DIR = Path(__file__).parent / "images"
-OUT_DIR = Path(__file__).parent / "diagnostic_out_sharpened"
+IMAGES_DIR = ROOT_DIR / "images"
+OUT_DIR = ROOT_DIR / "debug_output" / "diagnostic_out_sharpened"
 
 
 def main():
