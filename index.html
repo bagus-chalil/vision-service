@@ -43,12 +43,22 @@
   .badge.not_applicable { background: #eee; color: #777; }
   .roi-notes { margin-top: 12px; padding: 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 12px; color: #78350f; }
   .roi-notes b { display: block; margin-bottom: 4px; }
+  .badge.error { background: #fee2e2; color: #b91c1c; }
+  .badge.true { background: #dcfce7; color: #15803d; }
+  .badge.false { background: #fee2e2; color: #b91c1c; }
+  .kv { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .kv td { padding: 6px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+  .kv td:first-child { color: #555; width: 40%; white-space: nowrap; }
+  .crops { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .crop-box { flex: 1 1 140px; }
+  .crop-box .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+  .crop-box img { width: 100%; border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }
 </style>
 </head>
 <body>
 
 <h1>IPC Vision Service — OCR Test Tool</h1>
-<div class="sub">Local prototype only. Upload or capture a document photo, run PaddleOCR, inspect text + confidence + bounding boxes.</div>
+<div class="sub">Local prototype only. Upload or capture a photo, pick a field type, and run analysis - dispatches to the right pipeline per field type (plain whole-image OCR, or the tube emboss YOLO localize + crop sub-pipeline) automatically.</div>
 
 <div class="row">
 
@@ -88,6 +98,17 @@
       <canvas id="boxCanvas"></canvas>
     </div>
     <div id="emptyStage" style="color:#999; font-size:13px;">No image yet.</div>
+
+    <div class="crops hidden" id="cropsWrap">
+      <div class="crop-box">
+        <div class="label">Tube crop (YOLO localization)</div>
+        <img id="tubeCropImg" alt="tube crop">
+      </div>
+      <div class="crop-box">
+        <div class="label">Crimp crop (top 15%, sent to OCR)</div>
+        <img id="crimpCropImg" alt="crimp crop">
+      </div>
+    </div>
   </div>
 
   <div class="panel results">
@@ -96,7 +117,9 @@
       <thead><tr><th>#</th><th>Text</th><th>Confidence</th><th>Validation</th><th>Status</th></tr></thead>
       <tbody id="resultBody"></tbody>
     </table>
+    <table id="singleResultTable" class="kv hidden"></table>
     <div id="roiNotes" class="roi-notes hidden"></div>
+    <div id="mismatchNote" class="roi-notes hidden"></div>
   </div>
 
 </div>
@@ -122,12 +145,17 @@ const resultBody = document.getElementById('resultBody');
 const fieldTypeSelect = document.getElementById('fieldTypeSelect');
 const fieldTypeDesc = document.getElementById('fieldTypeDesc');
 const roiNotes = document.getElementById('roiNotes');
+const singleResultTable = document.getElementById('singleResultTable');
+const mismatchNote = document.getElementById('mismatchNote');
+const cropsWrap = document.getElementById('cropsWrap');
+const tubeCropImg = document.getElementById('tubeCropImg');
+const crimpCropImg = document.getElementById('crimpCropImg');
 
 let currentStream = null;
 let currentBlob = null;
 let fieldTypesByKey = {};
 
-// --- Load field types from backend (field_patterns.json is the source of truth) ---
+// --- Load field types from backend (merges field_patterns.json + emboss_format_patterns.json, each tagged with its pipeline) ---
 async function loadFieldTypes() {
   try {
     const base = backendUrlInput.value.replace(/\/+$/, '');
@@ -242,19 +270,27 @@ btnCapture.addEventListener('click', () => {
 btnRunOcr.addEventListener('click', async () => {
   if (!currentBlob) return;
   btnRunOcr.disabled = true;
-  setStatus('Running OCR...');
+  setStatus('Running analysis...');
   resultTable.classList.add('hidden');
-  resultMeta.textContent = 'Running OCR...';
+  singleResultTable.classList.add('hidden');
+  mismatchNote.classList.add('hidden');
+  cropsWrap.classList.add('hidden');
+  resultMeta.textContent = 'Running analysis...';
 
+  // request_id/debug only matter to the tube_emboss pipeline server-side -
+  // the generic pipeline ignores them, so it's fine to always send both.
+  const requestId = (crypto.randomUUID ? crypto.randomUUID() : 'req-' + Date.now());
   const formData = new FormData();
   formData.append('file', currentBlob, 'capture.jpg');
+  formData.append('request_id', requestId);
+  formData.append('debug', 'true');
   if (fieldTypeSelect.value) {
     formData.append('field_type', fieldTypeSelect.value);
   }
 
   try {
     const base = backendUrlInput.value.replace(/\/+$/, '');
-    const resp = await fetch(base + '/api/ocr', {
+    const resp = await fetch(base + '/api/analyze', {
       method: 'POST',
       body: formData,
     });
@@ -278,18 +314,30 @@ btnRunOcr.addEventListener('click', async () => {
 });
 
 function confClass(score) {
+  if (score === null || score === undefined) return '';
   if (score >= 0.9) return 'high';
   if (score >= 0.7) return 'mid';
   return 'low';
 }
 
 function badgeHtml(value) {
-  if (!value) return '';
-  const cls = value.toLowerCase();
+  if (value === null || value === undefined || value === '') return '<span class="field-desc">n/a</span>';
+  const cls = String(value).toLowerCase();
   return `<span class="badge ${cls}">${value}</span>`;
 }
 
+// Dispatches on data.pipeline ('generic' -> per-detection table + quad boxes,
+// 'tube_emboss' -> single kv result + tube bbox + crimp/tube crop previews),
+// tagged server-side by /api/analyze so this file never hardcodes field keys.
 function renderResults(data) {
+  if (data.pipeline === 'tube_emboss') {
+    renderTubeEmbossResult(data);
+  } else {
+    renderGenericResult(data);
+  }
+}
+
+function renderGenericResult(data) {
   resultMeta.textContent =
     `${data.detection_count} text region(s) - ${data.processing_time_ms} ms - ${data.image_width}x${data.image_height}px`;
 
@@ -328,6 +376,57 @@ function renderResults(data) {
   drawBoxes(data.detections);
 }
 
+function renderTubeEmbossResult(data) {
+  resultMeta.textContent = `field_type: ${data.field_type} - engine: ${data.engine_used ?? 'n/a'} - ${data.processing_time_ms} ms`;
+
+  const confPct = (data.confidence === null || data.confidence === undefined)
+    ? 'n/a'
+    : `<span class="conf ${confClass(data.confidence)}">${(data.confidence * 100).toFixed(1)}%</span>`;
+
+  const rows = [
+    ['status', badgeHtml(data.status)],
+    ['raw_ocr_text', data.raw_ocr_text ? `<b>${escapeHtml(data.raw_ocr_text)}</b>` : '<span class="field-desc">none</span>'],
+    ['confidence', confPct],
+    ['format_valid', badgeHtml(data.format_valid)],
+    ['engine_used', escapeHtml(data.engine_used ?? 'n/a')],
+    ['tube_detection_confidence', data.tube_detection_confidence != null ? (data.tube_detection_confidence * 100).toFixed(1) + '%' : 'n/a'],
+  ];
+  if (data.error_reason) {
+    rows.push(['error_reason', `<b style="color:#b91c1c">${escapeHtml(data.error_reason)}</b>`]);
+  }
+
+  singleResultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  singleResultTable.classList.remove('hidden');
+  resultTable.classList.add('hidden');
+
+  const mismatches = data.validation && data.validation.block_mismatches;
+  if (data.format_valid === false && data.validation) {
+    let msg = `expected_length: ${data.validation.expected_length ?? '?'}, actual_length: ${data.validation.actual_length ?? '?'}`;
+    if (data.validation.reason) msg += ` - ${data.validation.reason}`;
+    if (mismatches && mismatches.length) {
+      msg += '<br>' + mismatches.map(m => `<b>${escapeHtml(m.block)}</b>: ${escapeHtml(m.detail)}`).join('<br>');
+    }
+    mismatchNote.innerHTML = '<b>FORMAT_MISMATCH detail (text was NOT auto-corrected):</b>' + msg;
+    mismatchNote.classList.remove('hidden');
+  } else {
+    mismatchNote.classList.add('hidden');
+    mismatchNote.innerHTML = '';
+  }
+  roiNotes.classList.add('hidden');
+  roiNotes.innerHTML = '';
+
+  const ctx = boxCanvas.getContext('2d');
+  ctx.clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+  if (data.debug) {
+    if (data.debug.tube_bbox) drawTubeBox(data.debug.tube_bbox);
+    if (data.debug.tube_crop_base64 || data.debug.crimp_crop_base64) {
+      tubeCropImg.src = data.debug.tube_crop_base64 || '';
+      crimpCropImg.src = data.debug.crimp_crop_base64 || '';
+      cropsWrap.classList.remove('hidden');
+    }
+  }
+}
+
 function drawBoxes(detections) {
   const ctx = boxCanvas.getContext('2d');
   ctx.clearRect(0, 0, boxCanvas.width, boxCanvas.height);
@@ -356,9 +455,26 @@ function drawBoxes(detections) {
   });
 }
 
+function drawTubeBox(bbox) {
+  const ctx = boxCanvas.getContext('2d');
+  const [x1, y1, x2, y2] = bbox;
+  ctx.lineWidth = Math.max(2, boxCanvas.width / 300);
+  ctx.strokeStyle = '#2563eb';
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  // Crimp crop line = top 15% of the tube bbox, matches the pipeline's crop heuristic.
+  const crimpY = y1 + (y2 - y1) * 0.15;
+  ctx.strokeStyle = '#dc2626';
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(x1, crimpY);
+  ctx.lineTo(x2, crimpY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = str == null ? '' : str;
   return div.innerHTML;
 }
 
@@ -372,6 +488,11 @@ btnClear.addEventListener('click', () => {
   emptyStage.classList.remove('hidden');
   btnRunOcr.disabled = true;
   resultTable.classList.add('hidden');
+  singleResultTable.classList.add('hidden');
+  singleResultTable.innerHTML = '';
+  mismatchNote.classList.add('hidden');
+  mismatchNote.innerHTML = '';
+  cropsWrap.classList.add('hidden');
   resultMeta.textContent = 'Results will appear here after running OCR.';
   roiNotes.classList.add('hidden');
   roiNotes.innerHTML = '';

@@ -17,6 +17,7 @@ Run with:  uvicorn main:app --reload --port 8000
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 
 import cv2
@@ -31,6 +32,8 @@ FIELD_PATTERNS_PATH = Path(__file__).parent / "field_patterns.json"
 
 # Same threshold used for the Gemini Vision fallback in the real architecture.
 CONFIDENCE_THRESHOLD = 0.80
+
+DECODE_ERROR = {"error": "Could not decode image. Unsupported or corrupt file."}
 
 app = FastAPI(title="Vision Service - OCR Test Tool")
 
@@ -115,31 +118,12 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/api/field-types")
-def field_types():
-    """Lets the frontend build its field_type dropdown from field_patterns.json
-    instead of hardcoding field names in JS."""
-    config = load_field_patterns()
-    return [
-        {
-            "key": key,
-            "label": cfg.get("label", key),
-            "description": cfg.get("description"),
-            "expected_length": cfg.get("expected_length"),
-        }
-        for key, cfg in config.items()
-    ]
-
-
-@app.post("/api/ocr")
-async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
-    raw_bytes = await file.read()
-    np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
-    image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
-
-    if image is None:
-        return {"error": "Could not decode image. Unsupported or corrupt file."}
-
+def run_generic_pipeline(image, field_type):
+    """Whole-image OCR + per-detection regex validation, no localization/ROI
+    step - every text region PaddleOCR finds gets checked against
+    field_type's pattern. Fine for field types that don't need isolating
+    from surrounding text/noise; NOT what you want for something like the
+    tube cap emboss (see run_tube_emboss_pipeline)."""
     field_config = load_field_patterns()
     field_cfg = field_config.get(field_type, {}) if field_type else {}
 
@@ -174,6 +158,7 @@ async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
             )
 
     return {
+        "pipeline": "generic",
         "image_width": image.shape[1],
         "image_height": image.shape[0],
         "processing_time_ms": elapsed_ms,
@@ -183,20 +168,114 @@ async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
     }
 
 
+def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref):
+    """Tube emboss code sub-pipeline: YOLO11n localization -> crimp-area
+    crop -> PaddleOCR -> format validation. See tube_emboss_pipeline.py.
+    Still never decides PASS/FAIL/REVIEW - that stays in Laravel."""
+    start = time.time()
+    result = tube_emboss_pipeline.analyze_tube_emboss(
+        image,
+        field_type=field_type or tube_emboss_pipeline.DEFAULT_FIELD_TYPE,
+        request_id=request_id,
+        ocr_engine=ocr_engine,
+        yolo_model=tube_yolo_model,
+        debug=debug,
+        image_ref=image_ref,
+    )
+    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    result["pipeline"] = "tube_emboss"
+    return result
+
+
+@app.get("/api/field-types")
+def field_types():
+    """Unified field_type catalog for the frontend dropdown (index.html) -
+    merges field_patterns.json (generic, whole-image OCR, no localization)
+    and emboss_format_patterns.json (tube_emboss sub-pipeline: YOLO localize
+    + crop before OCR), each tagged with its 'pipeline' so /api/analyze
+    knows which one to dispatch to without field keys hardcoded in JS."""
+    merged = []
+    for key, cfg in load_field_patterns().items():
+        merged.append(
+            {
+                "key": key,
+                "label": cfg.get("label", key),
+                "description": cfg.get("description"),
+                "expected_length": cfg.get("expected_length"),
+                "pipeline": "generic",
+            }
+        )
+    for key, cfg in tube_emboss_pipeline.load_emboss_format_patterns().items():
+        merged.append(
+            {
+                "key": key,
+                "label": cfg.get("label", key),
+                "description": cfg.get("description"),
+                "expected_length": sum(b["width"] for b in cfg.get("blocks", [])) or None,
+                "pipeline": "tube_emboss",
+            }
+        )
+    return merged
+
+
+@app.post("/api/analyze")
+async def analyze(
+    file: UploadFile = File(...),
+    field_type: str = Form(None),
+    request_id: str = Form(None),
+    debug: bool = Form(False),
+):
+    """Single entrypoint for index.html: looks up field_type's pipeline in
+    emboss_format_patterns.json vs field_patterns.json and dispatches to the
+    matching pipeline above. This is the seam where future field types
+    (WI, exp date, etc.) plug in their own localization pipeline the same
+    way tube_emboss did, without the frontend needing to know or hardcode
+    which pipeline each field_type uses."""
+    raw_bytes = await file.read()
+    np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
+    image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return DECODE_ERROR
+
+    is_tube_emboss = bool(field_type) and field_type in tube_emboss_pipeline.load_emboss_format_patterns()
+    if is_tube_emboss:
+        return run_tube_emboss_pipeline(
+            image,
+            field_type=field_type,
+            request_id=request_id or str(uuid.uuid4()),
+            debug=debug,
+            image_ref=file.filename or "unknown",
+        )
+    return run_generic_pipeline(image, field_type)
+
+
 @app.get("/api/tube-emboss/field-types")
 def tube_emboss_field_types():
-    """Lets the tube emboss test page build its field_type dropdown from
-    emboss_format_patterns.json instead of hardcoding field names in JS."""
+    """Lets the standalone tube emboss test page (tube_emboss.html) build
+    its field_type dropdown from emboss_format_patterns.json directly."""
     config = tube_emboss_pipeline.load_emboss_format_patterns()
     return [
         {
             "key": key,
             "label": cfg.get("label", key),
             "description": cfg.get("description"),
-            "expected_length": len(cfg.get("charset", [])) or None,
+            "expected_length": sum(b["width"] for b in cfg.get("blocks", [])) or None,
         }
         for key, cfg in config.items()
     ]
+
+
+@app.post("/api/ocr")
+async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
+    raw_bytes = await file.read()
+    np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
+    image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return DECODE_ERROR
+
+    return run_generic_pipeline(image, field_type)
 
 
 @app.post("/api/tube-emboss/analyze")
@@ -206,25 +285,19 @@ async def tube_emboss_analyze(
     field_type: str = Form(None),
     debug: bool = Form(False),
 ):
-    """Tube emboss code sub-pipeline: YOLO11n localization -> crimp-area
-    crop -> PaddleOCR -> format validation. See tube_emboss_pipeline.py.
-    Still never decides PASS/FAIL/REVIEW - that stays in Laravel."""
+    """Tube emboss code sub-pipeline, kept as its own endpoint for the
+    standalone tube_emboss.html page and tests/test_tube_emboss.py."""
     raw_bytes = await file.read()
     np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
     image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
 
     if image is None:
-        return {"error": "Could not decode image. Unsupported or corrupt file."}
+        return DECODE_ERROR
 
-    start = time.time()
-    result = tube_emboss_pipeline.analyze_tube_emboss(
+    return run_tube_emboss_pipeline(
         image,
         field_type=field_type or tube_emboss_pipeline.DEFAULT_FIELD_TYPE,
         request_id=request_id,
-        ocr_engine=ocr_engine,
-        yolo_model=tube_yolo_model,
         debug=debug,
         image_ref=file.filename or "unknown",
     )
-    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
-    return result

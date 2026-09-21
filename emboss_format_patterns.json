@@ -2,15 +2,15 @@
   "_comment": "Tube emboss code format config, keyed by field_type (add one entry per SKU if formats diverge later). 'blocks' is an ordered list of fixed-width chunks: type 'int_range' checks the chunk is all digits AND numerically within [min,max] (e.g. day 1-31, not just 'first digit is 0-3' - that wrongly let '39' or '00' through); type 'charset' checks each character in the chunk against a regex class. expected_length is the sum of block widths. No auto-strip/auto-fix is ever applied to OCR text - a length mismatch or any block failing its check always flags FORMAT_MISMATCH, regardless of confidence.",
 
   "tube_emboss_default": {
-    "label": "Tube Emboss Code (DDMMYY + 3-letter batch + 1-digit manufacture code)",
-    "description": "DDMMYY date (day 01-31, month 01-12, year 00-99) + 3-letter batch code (from PPIC batch number table) + 1-digit Cosmax manufacture code, e.g. 310826ALZ8 -> day=31 month=08 year=26 batch=ALZ mfg=8",
+    "label": "Tube Emboss Code (DDMMYY + 3-char alphanumeric batch + 1-digit manufacture code)",
+    "description": "DDMMYY date (day 01-31, month 01-12, year 00-99) + 3-char batch code (from PPIC batch number table, confirmed can mix letters and digits e.g. AL1/AL2, not letters-only) + 1-digit Cosmax manufacture code, e.g. 310826ALZ8 -> day=31 month=08 year=26 batch=ALZ mfg=8",
     "blocks": [
       { "name": "day",         "width": 2, "type": "int_range", "min": 1, "max": 31 },
       { "name": "month",       "width": 2, "type": "int_range", "min": 1, "max": 12 },
       { "name": "year",        "width": 2, "type": "int_range", "min": 0, "max": 99 },
-      { "name": "batch_1",     "width": 1, "type": "charset", "pattern": "[A-Za-z]" },
-      { "name": "batch_2",     "width": 1, "type": "charset", "pattern": "[A-Za-z]" },
-      { "name": "batch_3",     "width": 1, "type": "charset", "pattern": "[A-Za-z]" },
+      { "name": "batch_1",     "width": 1, "type": "charset", "pattern": "[A-Za-z0-9]" },
+      { "name": "batch_2",     "width": 1, "type": "charset", "pattern": "[A-Za-z0-9]" },
+      { "name": "batch_3",     "width": 1, "type": "charset", "pattern": "[A-Za-z0-9]" },
       { "name": "mfg_code",    "width": 1, "type": "charset", "pattern": "[0-9]" }
     ]
   }

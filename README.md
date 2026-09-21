@@ -7,12 +7,16 @@ code** — tidak ada auth, HTTPS, atau request_id/API contract final.
 ## Struktur project
 
 ```
-main.py                       FastAPI backend (PaddleOCR + validasi format)
+main.py                       FastAPI backend. /api/analyze = 1 entrypoint, dispatch otomatis ke
+                               generic pipeline (field_patterns.json) atau tube_emboss pipeline
+                               (emboss_format_patterns.json) berdasarkan field_type yang dikirim
 tube_emboss_pipeline.py       Sub-pipeline: YOLO tube localize + crimp OCR + format validasi
-field_patterns.json           Config regex per field_type, dipakai /api/ocr (edit manual, no restart)
-emboss_format_patterns.json   Config block-based (day/month/year/batch/mfg_code), dipakai tube emboss pipeline
-index.html                    Frontend testing generic (upload/camera + hasil OCR)
-tube_emboss.html              Frontend testing khusus tube emboss sub-pipeline
+field_patterns.json           Config regex per field_type generic (no localization) - edit manual, no restart
+emboss_format_patterns.json   Config block-based (day/month/year/batch/mfg_code) - field_type di sini
+                               otomatis lewat tube_emboss pipeline, bukan generic
+index.html                    Frontend testing UNIFIED - 1 dropdown field_type untuk semua tipe,
+                               otomatis pakai pipeline yang benar per tipe (lewat /api/analyze)
+tube_emboss.html              Frontend testing standalone khusus tube emboss sub-pipeline (dev/debug)
 tests/                        Script verifikasi manual (test_ocr.py, test_tube_emboss.py)
 tools/                        Script diagnostic/batch dev-only, bukan bagian dari service
 images/                       Sample foto testing
@@ -54,43 +58,63 @@ Server di VS Code). Pastikan field **Backend URL** di panel kiri sudah
 
 ## Cara pakai
 
-1. Pilih **Field type** di dropdown (opsional) — menentukan pattern validasi
-   apa yang dipakai (lihat `field_patterns.json`).
+1. Pilih **Field type** di dropdown — ini gabungan dari `field_patterns.json`
+   dan `emboss_format_patterns.json`. Frontend tidak perlu tahu pipeline mana
+   yang dipakai; backend (`/api/analyze`) yang menentukan otomatis dari
+   field_type yang dipilih.
 2. Upload foto dari file, atau klik **Use camera** untuk ambil foto langsung
    (simulasi kamera HP).
 3. Klik **Run OCR**.
-4. Lihat hasil: teks terbaca, confidence, kolom **Validation**
-   (`FORMAT_OK` / `FORMAT_MISMATCH` / `NOT_APPLICABLE`), kolom **Status**
-   gabungan (`OK` / `LOW_CONFIDENCE` / `FORMAT_MISMATCH`), dan bounding box
-   digambar di atas gambar (warna ikut status, bukan confidence mentah).
-5. Kalau ada catatan ROI (misal field emboss tutup tube), muncul di panel
-   kuning **ROI review note(s)** di bawah tabel hasil.
+4. Hasil tampil beda bentuk tergantung pipeline field_type-nya:
+   - **Generic** (`generic`, `wo_number`, `batch_no`, dst — whole-image OCR,
+     tanpa localization): tabel semua text region yang terdeteksi, kolom
+     **Validation** (`FORMAT_OK` / `FORMAT_MISMATCH` / `NOT_APPLICABLE`),
+     kolom **Status** gabungan (`OK` / `LOW_CONFIDENCE` / `FORMAT_MISMATCH`),
+     bounding box per region di atas gambar.
+   - **Tube emboss** (`tube_emboss_default`, dst — YOLO localize + crop dulu
+     baru OCR): satu hasil tunggal (raw_ocr_text, confidence, format_valid,
+     status), bounding box tube + garis crop, plus preview crop tube & crimp
+     di bawah gambar.
+5. Kalau ada catatan ROI/format mismatch, muncul di panel kuning di bawah
+   tabel hasil.
 
 ## Menambah / edit field type
 
-Edit `field_patterns.json` langsung — file ini dibaca ulang setiap request,
-**tidak perlu restart backend**. Struktur satu entry:
+Ada 2 config, pilih sesuai kebutuhan field-nya:
 
-```json
-"date_code": {
-  "label": "Date/Batch Code (tube cap emboss)",
-  "description": "DDMMYY + 4-char alnum batch suffix, e.g. 3108260HB8",
-  "pattern": "^\\d{6}[A-Za-z0-9]{4}$",
-  "expected_length": 10,
-  "roi_hint": "Catatan opsional, muncul di UI saat FORMAT_MISMATCH terjadi pada field ini."
-}
-```
+- **`field_patterns.json`** — generic, whole-image OCR + regex, TANPA
+  localization. Cocok untuk field yang teksnya sudah cukup terisolasi di
+  foto (misal WO number di form). Dibaca ulang setiap request, **tidak
+  perlu restart backend**. Struktur satu entry:
 
-- `pattern` — regex Python (`re.fullmatch`, harus match keseluruhan teks).
-  Set `null` kalau field ini tidak perlu validasi format (selalu
-  `NOT_APPLICABLE`, hanya pakai confidence seperti biasa).
-- `roi_hint` — catatan yang tampil **hanya saat mismatch terjadi**, biasanya
-  dipakai untuk field yang sudah diketahui rawan salah baca karena elemen
-  fisik di sekitar teks (contoh: garis knurl/ridge di emboss tutup tube).
-  Set `null` kalau tidak ada catatan.
-- Teks hasil OCR **tidak pernah** di-strip/trim otomatis oleh sistem —
-  dicocokkan apa adanya ke pattern. Kalau mismatch, itu tetap harus direview
-  manusia, bukan ditebak/dipotong otomatis.
+  ```json
+  "wo_number": {
+    "label": "Work Order Number",
+    "description": "WO + 6 digits, e.g. WO123456",
+    "pattern": "^WO\\d{6}$",
+    "expected_length": 8,
+    "roi_hint": "Catatan opsional, muncul di UI saat FORMAT_MISMATCH terjadi pada field ini."
+  }
+  ```
+
+  - `pattern` — regex Python (`re.fullmatch`, harus match keseluruhan teks).
+    Set `null` kalau field ini tidak perlu validasi format (selalu
+    `NOT_APPLICABLE`, hanya pakai confidence seperti biasa).
+  - `roi_hint` — catatan yang tampil **hanya saat mismatch terjadi**.
+    Set `null` kalau tidak ada catatan.
+
+- **`emboss_format_patterns.json`** — field yang butuh localization dulu
+  sebelum OCR (foto berisi banyak elemen lain, bukan cuma teksnya). Saat ini
+  cuma tube cap emboss (`tube_emboss_default`, lewat YOLO + crop di
+  `tube_emboss_pipeline.py`). Field type yang key-nya ada di file ini
+  **otomatis** di-route ke pipeline itu oleh `/api/analyze` — tidak perlu
+  pengaturan tambahan di frontend. Kalau nanti WI/exp date juga butuh
+  localization sendiri (Fixed ROI + homography), pipeline barunya didaftarkan
+  di sini juga, dengan pola yang sama.
+
+- Teks hasil OCR **tidak pernah** di-strip/trim otomatis oleh sistem, di
+  kedua config — dicocokkan apa adanya ke pattern. Kalau mismatch, itu tetap
+  harus direview manusia, bukan ditebak/dipotong otomatis.
 
 ## Known issues / workarounds
 
