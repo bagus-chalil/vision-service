@@ -5,9 +5,13 @@ Three stages, in order:
   1. YOLO11n localization (best.pt) -> crop to tube bbox -> crop again to the
      top ~15% of that crop (crimp seal area, where the date/batch code is
      embossed). If 0 tubes detected or confidence too low, stop before OCR.
-  2. PaddleOCR recognition on the crimp crop (reuses the PaddleOCR instance
-     already loaded in main.py - do not construct a second one, model load
-     is slow and doubles memory).
+  2. PaddleOCR recognition on the crimp crop, run twice via
+     recognize_crimp_text_dual() - once on the raw crop, once on a
+     sharpened/contrast-enhanced version (preprocess_crimp_for_ocr()) - and
+     cross-validated: agreement -> trust it, disagreement -> confidence is
+     capped so it always routes to LOW_CONFIDENCE rather than picking a side
+     blindly. Reuses the PaddleOCR instance already loaded in main.py - do
+     not construct a second one, model load is slow and doubles memory.
   3. Format validation against emboss_format_patterns.json. Same hard rule
      as the document-OCR pipeline: never strip/trim/guess-correct OCR text.
      A length or per-position charset mismatch always flags FORMAT_MISMATCH,
@@ -106,6 +110,28 @@ def localize_tube(image_bgr, yolo_model, min_confidence: float = YOLO_MIN_CONFID
     }
 
 
+def preprocess_crimp_for_ocr(crimp_crop_bgr):
+    """Contrast-enhance + sharpen + upscale the crimp crop before OCR.
+    Emboss text has low native contrast (raised metal, not printed ink) and
+    the crimp crop is small (~200-280px tall) - this compensates for both.
+    Pixel-only transform, runs before OCR sees the image - does not touch
+    recognized text, so the never-strip/never-correct-text rule is untouched."""
+    gray = cv2.cvtColor(crimp_crop_bgr, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    contrast_enhanced = clahe.apply(denoised)
+
+    upscaled = cv2.resize(
+        contrast_enhanced, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
+    )
+
+    blurred = cv2.GaussianBlur(upscaled, (0, 0), sigmaX=1.0)
+    sharpened = cv2.addWeighted(upscaled, 1.5, blurred, -0.5, 0)
+
+    return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+
 def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
     """Stage 2: PaddleOCR on the crimp crop. If PaddleOCR splits the code
     into multiple text detections, join them in reading order (top-to-bottom,
@@ -135,6 +161,64 @@ def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
         "text": combined_text,
         "confidence": round(combined_confidence, 4),
         "piece_count": len(texts),
+    }
+
+
+def recognize_crimp_text_dual(crimp_crop, ocr_engine) -> dict:
+    """Runs recognize_crimp_text() twice - once on the raw crimp crop, once
+    on preprocess_crimp_for_ocr()'s sharpened version - and cross-validates:
+
+    - Both sides agree on the exact text -> trust it, confidence = the
+      higher of the two (independent agreement is itself evidence).
+    - Disagreement (including only one side detecting anything) -> never
+      silently pick a side. Take whichever text has the higher confidence,
+      but cap the returned confidence just under GEMINI_FALLBACK_THRESHOLD
+      so analyze_tube_emboss() always routes it to LOW_CONFIDENCE (and the
+      Gemini fallback, once implemented) instead of accepting a guess as OK.
+    - Neither side detects anything -> not detected.
+
+    This never edits characters within either OCR pass - it only chooses
+    between two complete, untouched OCR outputs.
+    """
+    raw_result = recognize_crimp_text(crimp_crop, ocr_engine)
+    sharpened_crop = preprocess_crimp_for_ocr(crimp_crop)
+    sharp_result = recognize_crimp_text(sharpened_crop, ocr_engine)
+
+    raw_text = raw_result.get("text") if raw_result["detected"] else None
+    raw_conf = raw_result.get("confidence") if raw_result["detected"] else None
+    sharp_text = sharp_result.get("text") if sharp_result["detected"] else None
+    sharp_conf = sharp_result.get("confidence") if sharp_result["detected"] else None
+
+    if raw_text is None and sharp_text is None:
+        return {"detected": False}
+
+    agreement = raw_text is not None and raw_text == sharp_text
+
+    if agreement:
+        return {
+            "detected": True,
+            "text": raw_text,
+            "confidence": round(max(raw_conf, sharp_conf), 4),
+            "agreement": True,
+            "raw_text": raw_text,
+            "raw_confidence": raw_conf,
+            "sharpened_text": sharp_text,
+            "sharpened_confidence": sharp_conf,
+        }
+
+    candidates = [(t, c) for t, c in ((raw_text, raw_conf), (sharp_text, sharp_conf)) if t is not None]
+    best_text, best_conf = max(candidates, key=lambda tc: tc[1])
+    capped_confidence = min(best_conf, GEMINI_FALLBACK_THRESHOLD - 0.01)
+
+    return {
+        "detected": True,
+        "text": best_text,
+        "confidence": round(capped_confidence, 4),
+        "agreement": False,
+        "raw_text": raw_text,
+        "raw_confidence": raw_conf,
+        "sharpened_text": sharp_text,
+        "sharpened_confidence": sharp_conf,
     }
 
 
@@ -278,7 +362,7 @@ def analyze_tube_emboss(
     tube_crop = localization["tube_crop"]
     crimp_crop = localization["crimp_crop"]
 
-    ocr_result = recognize_crimp_text(crimp_crop, ocr_engine)
+    ocr_result = recognize_crimp_text_dual(crimp_crop, ocr_engine)
 
     if not ocr_result["detected"]:
         result = {
@@ -297,11 +381,13 @@ def analyze_tube_emboss(
                 "tube_bbox": localization["bbox"],
                 "tube_crop_base64": _encode_debug_image(tube_crop),
                 "crimp_crop_base64": _encode_debug_image(crimp_crop),
+                "sharpened_crimp_crop_base64": _encode_debug_image(preprocess_crimp_for_ocr(crimp_crop)),
             }
         return result
 
     raw_text = ocr_result["text"]
     confidence = ocr_result["confidence"]
+    ocr_agreement = ocr_result["agreement"]
     engine_used = "paddleocr"
 
     if confidence < GEMINI_FALLBACK_THRESHOLD:
@@ -321,6 +407,8 @@ def analyze_tube_emboss(
             reasons.append("LOW_CONFIDENCE")
         if format_valid is False:
             reasons.append("FORMAT_MISMATCH")
+        if not ocr_agreement:
+            reasons.append("OCR_DISAGREEMENT")
         log_fallback_case(
             request_id=request_id,
             field_type=resolved_field_type,
@@ -332,6 +420,11 @@ def analyze_tube_emboss(
             format_valid=format_valid,
             reasons=reasons,
             validation=validation,
+            ocr_agreement=ocr_agreement,
+            ocr_raw_text=ocr_result.get("raw_text"),
+            ocr_raw_confidence=ocr_result.get("raw_confidence"),
+            ocr_sharpened_text=ocr_result.get("sharpened_text"),
+            ocr_sharpened_confidence=ocr_result.get("sharpened_confidence"),
         )
 
     result = {
@@ -342,6 +435,7 @@ def analyze_tube_emboss(
         "format_valid": format_valid,
         "status": status,
         "engine_used": engine_used,
+        "ocr_agreement": ocr_agreement,
         "validation": validation,
         "tube_detection_confidence": localization["confidence"],
     }
@@ -351,6 +445,11 @@ def analyze_tube_emboss(
             "tube_bbox": localization["bbox"],
             "tube_crop_base64": _encode_debug_image(tube_crop),
             "crimp_crop_base64": _encode_debug_image(crimp_crop),
+            "sharpened_crimp_crop_base64": _encode_debug_image(preprocess_crimp_for_ocr(crimp_crop)),
+            "ocr_raw_text": ocr_result.get("raw_text"),
+            "ocr_raw_confidence": ocr_result.get("raw_confidence"),
+            "ocr_sharpened_text": ocr_result.get("sharpened_text"),
+            "ocr_sharpened_confidence": ocr_result.get("sharpened_confidence"),
         }
 
     return result
