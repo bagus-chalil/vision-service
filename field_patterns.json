@@ -9,10 +9,10 @@
 
   "date_code": {
     "label": "Date/Batch Code (tube cap emboss)",
-    "description": "DDMMYY + 4-char alnum batch suffix, e.g. 3108260HB8",
-    "pattern": "^\\d{6}[A-Za-z0-9]{4}$",
+    "description": "DDMMYY (6 digit MFG date) + 3-letter batch code + 1-digit Cosmax manufacture code, e.g. 310826ALZ8",
+    "pattern": "^\\d{6}[A-Za-z]{3}\\d{1}$",
     "expected_length": 10,
-    "roi_hint": "Embossed on the tube cap/shoulder. The knurl/ridge line next to the text has been misread as an extra character before (e.g. OCR read '13108260HB8' - 11 chars - instead of the correct '3108260HB8' - 10 chars - with high confidence). If FORMAT_MISMATCH keeps showing one extra leading/trailing character on this field, narrow the Fixed ROI to exclude the ridge area when you define it."
+    "roi_hint": "Embossed on the tube cap/shoulder. Structure per reference doc: chars 1-6 = DDMMYY filling date, chars 7-9 = batch code letters (from PPIC batch number table), char 10 = single-digit Cosmax manufacture code. The knurl/ridge line next to the text has been misread as an extra character before (e.g. OCR read '13108260HB8' - 11 chars - instead of the correct '3108260HB8' - 10 chars - with high confidence; the '0' in that older sample was likely an OCR misread of the letter 'O'). If FORMAT_MISMATCH keeps showing one extra leading/trailing character on this field, narrow the Fixed ROI to exclude the ridge area when you define it."
   },
 
   "wo_number": {
