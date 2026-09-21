@@ -19,3 +19,6 @@ Thumbs.db
 
 # Local scratch test images/files
 *.tmp.png
+
+# Runtime-generated fallback/training-data logs (not source)
+logs/

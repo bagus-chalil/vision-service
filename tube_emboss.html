@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>IPC Vision Service - Tube Emboss Test Tool</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 24px; background: #f4f5f7; color: #1a1a1a; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #666; margin-bottom: 20px; font-size: 13px; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+  .controls { flex: 0 0 280px; }
+  .stage { flex: 1 1 480px; min-width: 320px; }
+  .results { flex: 1 1 380px; min-width: 300px; max-height: 80vh; overflow-y: auto; }
+  button { padding: 8px 14px; margin: 4px 4px 4px 0; border: 1px solid #bbb; border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; }
+  button:hover { background: #eee; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.primary:hover { background: #1d4ed8; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  video, canvas, img.preview { max-width: 100%; border-radius: 6px; display: block; }
+  #camWrap { margin-top: 10px; }
+  .hidden { display: none !important; }
+  .stack { position: relative; display: inline-block; max-width: 100%; }
+  .stack canvas { max-width: 100%; height: auto; }
+  #boxCanvas { position: absolute; top: 0; left: 0; }
+  .meta { font-size: 12px; color: #666; margin-bottom: 8px; }
+  .status { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  label.field { display: block; font-size: 12px; color: #555; margin: 10px 0 4px; }
+  input[type=text], select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+  .field-desc { font-size: 11px; color: #888; margin-top: 3px; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .badge.ok { background: #dcfce7; color: #15803d; }
+  .badge.low_confidence { background: #fef3c7; color: #b45309; }
+  .badge.error { background: #fee2e2; color: #b91c1c; }
+  .badge.true { background: #dcfce7; color: #15803d; }
+  .badge.false { background: #fee2e2; color: #b91c1c; }
+  .kv { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .kv td { padding: 5px 4px; border-bottom: 1px solid #eee; vertical-align: top; }
+  .kv td:first-child { color: #555; width: 40%; white-space: nowrap; }
+  .conf { font-weight: 600; }
+  .conf.high { color: #16a34a; }
+  .conf.mid { color: #d97706; }
+  .conf.low { color: #dc2626; }
+  .crops { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .crop-box { flex: 1 1 140px; }
+  .crop-box .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+  .crop-box img { width: 100%; border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }
+  .mismatch-note { margin-top: 12px; padding: 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 12px; color: #78350f; }
+  .mismatch-note b { display: block; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<h1>IPC Vision Service — Tube Emboss Test Tool</h1>
+<div class="sub">Local prototype only. Upload or capture a tube photo, run YOLO11n localization + PaddleOCR on the crimp crop, inspect the crops + format validation. Separate sub-pipeline from the document OCR tool (index.html) — does not touch it.</div>
+
+<div class="row">
+
+  <div class="panel controls">
+    <label class="field">Backend URL</label>
+    <input type="text" id="backendUrl" value="http://127.0.0.1:8000">
+
+    <label class="field">Field type (emboss format config)</label>
+    <select id="fieldTypeSelect"><option value="">Loading...</option></select>
+    <div class="field-desc" id="fieldTypeDesc"></div>
+
+    <label class="field">1. Get an image</label>
+    <button id="btnPickFile">Upload from file</button>
+    <input type="file" id="fileInput" accept="image/*" class="hidden">
+
+    <button id="btnOpenCam">Use camera</button>
+
+    <div id="camWrap" class="hidden">
+      <video id="video" autoplay playsinline width="260"></video>
+      <div>
+        <button id="btnCapture">Capture photo</button>
+        <button id="btnCloseCam">Close camera</button>
+      </div>
+    </div>
+
+    <label class="field">2. Run</label>
+    <button id="btnRunAnalyze" class="primary" disabled>Run analysis</button>
+    <button id="btnClear">Clear</button>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="panel stage">
+    <div class="meta">Preview (tube bounding box drawn after analysis runs)</div>
+    <div id="stackWrap" class="stack">
+      <canvas id="imgCanvas"></canvas>
+      <canvas id="boxCanvas"></canvas>
+    </div>
+    <div id="emptyStage" style="color:#999; font-size:13px;">No image yet.</div>
+
+    <div class="crops hidden" id="cropsWrap">
+      <div class="crop-box">
+        <div class="label">Stage 1: tube crop</div>
+        <img id="tubeCropImg" alt="tube crop">
+      </div>
+      <div class="crop-box">
+        <div class="label">Stage 1: crimp crop (top 15%, sent to OCR)</div>
+        <img id="crimpCropImg" alt="crimp crop">
+      </div>
+    </div>
+  </div>
+
+  <div class="panel results">
+    <div class="meta" id="resultMeta">Results will appear here after running analysis.</div>
+    <table class="kv hidden" id="resultTable"></table>
+    <div id="mismatchNote" class="mismatch-note hidden"></div>
+  </div>
+
+</div>
+
+<script>
+const backendUrlInput = document.getElementById('backendUrl');
+const fileInput = document.getElementById('fileInput');
+const btnPickFile = document.getElementById('btnPickFile');
+const btnOpenCam = document.getElementById('btnOpenCam');
+const btnCloseCam = document.getElementById('btnCloseCam');
+const btnCapture = document.getElementById('btnCapture');
+const btnRunAnalyze = document.getElementById('btnRunAnalyze');
+const btnClear = document.getElementById('btnClear');
+const camWrap = document.getElementById('camWrap');
+const video = document.getElementById('video');
+const imgCanvas = document.getElementById('imgCanvas');
+const boxCanvas = document.getElementById('boxCanvas');
+const emptyStage = document.getElementById('emptyStage');
+const statusEl = document.getElementById('status');
+const resultMeta = document.getElementById('resultMeta');
+const resultTable = document.getElementById('resultTable');
+const mismatchNote = document.getElementById('mismatchNote');
+const fieldTypeSelect = document.getElementById('fieldTypeSelect');
+const fieldTypeDesc = document.getElementById('fieldTypeDesc');
+const cropsWrap = document.getElementById('cropsWrap');
+const tubeCropImg = document.getElementById('tubeCropImg');
+const crimpCropImg = document.getElementById('crimpCropImg');
+
+let currentStream = null;
+let currentBlob = null;
+let fieldTypesByKey = {};
+
+// --- Load field types from backend (emboss_format_patterns.json is the source of truth) ---
+async function loadFieldTypes() {
+  try {
+    const base = backendUrlInput.value.replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/tube-emboss/field-types');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const types = await resp.json();
+    fieldTypesByKey = {};
+    fieldTypeSelect.innerHTML = '';
+    types.forEach((t) => {
+      fieldTypesByKey[t.key] = t;
+      const opt = document.createElement('option');
+      opt.value = t.key;
+      opt.textContent = t.label;
+      fieldTypeSelect.appendChild(opt);
+    });
+    updateFieldTypeDesc();
+  } catch (err) {
+    fieldTypeSelect.innerHTML = '<option value="">(failed to load - check backend URL)</option>';
+    fieldTypeDesc.textContent = '';
+  }
+}
+
+function updateFieldTypeDesc() {
+  const t = fieldTypesByKey[fieldTypeSelect.value];
+  fieldTypeDesc.textContent = t && t.description ? t.description : '';
+}
+
+fieldTypeSelect.addEventListener('change', updateFieldTypeDesc);
+loadFieldTypes();
+
+function setStatus(msg, isError) {
+  statusEl.textContent = msg || '';
+  statusEl.style.color = isError ? '#dc2626' : '#444';
+}
+
+function drawImageToCanvas(imgEl) {
+  const w = imgEl.naturalWidth || imgEl.width;
+  const h = imgEl.naturalHeight || imgEl.height;
+  imgCanvas.width = w;
+  imgCanvas.height = h;
+  boxCanvas.width = w;
+  boxCanvas.height = h;
+  const ctx = imgCanvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(imgEl, 0, 0, w, h);
+  boxCanvas.getContext('2d').clearRect(0, 0, w, h);
+  emptyStage.classList.add('hidden');
+  btnRunAnalyze.disabled = false;
+}
+
+function loadBlobIntoStage(blob) {
+  currentBlob = blob;
+  const url = URL.createObjectURL(blob);
+  const imgEl = new Image();
+  imgEl.onload = () => {
+    drawImageToCanvas(imgEl);
+    URL.revokeObjectURL(url);
+  };
+  imgEl.src = url;
+  cropsWrap.classList.add('hidden');
+}
+
+// --- File upload ---
+btnPickFile.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) loadBlobIntoStage(f);
+});
+
+// --- Camera capture ---
+btnOpenCam.addEventListener('click', async () => {
+  try {
+    currentStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+    });
+    video.srcObject = currentStream;
+    camWrap.classList.remove('hidden');
+    setStatus('Camera active.');
+  } catch (err) {
+    setStatus('Camera error: ' + err.message, true);
+  }
+});
+
+btnCloseCam.addEventListener('click', () => stopCamera());
+
+function stopCamera() {
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+  camWrap.classList.add('hidden');
+}
+
+btnCapture.addEventListener('click', () => {
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  if (!w || !h) {
+    setStatus('Camera not ready yet.', true);
+    return;
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  tmp.getContext('2d').drawImage(video, 0, 0, w, h);
+  tmp.toBlob((blob) => {
+    loadBlobIntoStage(blob);
+    stopCamera();
+    setStatus('Photo captured from camera.');
+  }, 'image/jpeg', 0.92);
+});
+
+// --- Run analysis ---
+btnRunAnalyze.addEventListener('click', async () => {
+  if (!currentBlob) return;
+  btnRunAnalyze.disabled = true;
+  setStatus('Running YOLO + PaddleOCR...');
+  resultTable.classList.add('hidden');
+  mismatchNote.classList.add('hidden');
+  cropsWrap.classList.add('hidden');
+  resultMeta.textContent = 'Running...';
+
+  const requestId = (crypto.randomUUID ? crypto.randomUUID() : 'req-' + Date.now());
+  const formData = new FormData();
+  formData.append('file', currentBlob, 'capture.jpg');
+  formData.append('request_id', requestId);
+  formData.append('debug', 'true');
+  if (fieldTypeSelect.value) {
+    formData.append('field_type', fieldTypeSelect.value);
+  }
+
+  try {
+    const base = backendUrlInput.value.replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/tube-emboss/analyze', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
+    const data = await resp.json();
+    if (data.error) {
+      setStatus(data.error, true);
+      resultMeta.textContent = data.error;
+    } else {
+      renderResult(data);
+      setStatus('Done.');
+    }
+  } catch (err) {
+    setStatus('Request failed: ' + err.message + ' (is the backend running and is the URL correct?)', true);
+    resultMeta.textContent = 'Request failed.';
+  } finally {
+    btnRunAnalyze.disabled = false;
+  }
+});
+
+function confClass(score) {
+  if (score === null || score === undefined) return '';
+  if (score >= 0.9) return 'high';
+  if (score >= 0.7) return 'mid';
+  return 'low';
+}
+
+function badgeHtml(value) {
+  if (value === null || value === undefined) return '<span class="field-desc">n/a</span>';
+  const cls = String(value).toLowerCase();
+  return `<span class="badge ${cls}">${value}</span>`;
+}
+
+function renderResult(data) {
+  resultMeta.textContent = `field_type: ${data.field_type} - engine: ${data.engine_used ?? 'n/a'} - ${data.processing_time_ms} ms`;
+
+  const confPct = (data.confidence === null || data.confidence === undefined)
+    ? 'n/a'
+    : `<span class="conf ${confClass(data.confidence)}">${(data.confidence * 100).toFixed(1)}%</span>`;
+
+  const rows = [
+    ['request_id', escapeHtml(data.request_id ?? '')],
+    ['status', badgeHtml(data.status)],
+    ['raw_ocr_text', data.raw_ocr_text ? `<b>${escapeHtml(data.raw_ocr_text)}</b>` : '<span class="field-desc">none</span>'],
+    ['confidence', confPct],
+    ['format_valid', badgeHtml(data.format_valid)],
+    ['engine_used', escapeHtml(data.engine_used ?? 'n/a')],
+    ['tube_detection_confidence', data.tube_detection_confidence != null ? (data.tube_detection_confidence * 100).toFixed(1) + '%' : 'n/a'],
+  ];
+  if (data.error_reason) {
+    rows.push(['error_reason', `<b style="color:#b91c1c">${escapeHtml(data.error_reason)}</b>`]);
+  }
+
+  resultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  resultTable.classList.remove('hidden');
+
+  const mismatches = data.validation && data.validation.block_mismatches;
+  if (data.format_valid === false && data.validation) {
+    let msg = `expected_length: ${data.validation.expected_length ?? '?'}, actual_length: ${data.validation.actual_length ?? '?'}`;
+    if (data.validation.reason) msg += ` — ${data.validation.reason}`;
+    if (mismatches && mismatches.length) {
+      msg += '<br>' + mismatches.map(m => `<b>${escapeHtml(m.block)}</b>: ${escapeHtml(m.detail)}`).join('<br>');
+    }
+    mismatchNote.innerHTML = '<b>FORMAT_MISMATCH detail (text was NOT auto-corrected):</b>' + msg;
+    mismatchNote.classList.remove('hidden');
+  } else {
+    mismatchNote.classList.add('hidden');
+    mismatchNote.innerHTML = '';
+  }
+
+  if (data.debug) {
+    if (data.debug.tube_bbox) drawTubeBox(data.debug.tube_bbox);
+    if (data.debug.tube_crop_base64 || data.debug.crimp_crop_base64) {
+      tubeCropImg.src = data.debug.tube_crop_base64 || '';
+      crimpCropImg.src = data.debug.crimp_crop_base64 || '';
+      cropsWrap.classList.remove('hidden');
+    }
+  }
+}
+
+function drawTubeBox(bbox) {
+  const ctx = boxCanvas.getContext('2d');
+  ctx.clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+  const [x1, y1, x2, y2] = bbox;
+  ctx.lineWidth = Math.max(2, boxCanvas.width / 300);
+  ctx.strokeStyle = '#2563eb';
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  // Crimp crop line = top 15% of the tube bbox, matches the pipeline's crop heuristic.
+  const crimpY = y1 + (y2 - y1) * 0.15;
+  ctx.strokeStyle = '#dc2626';
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(x1, crimpY);
+  ctx.lineTo(x2, crimpY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : str;
+  return div.innerHTML;
+}
+
+btnClear.addEventListener('click', () => {
+  currentBlob = null;
+  fileInput.value = '';
+  stopCamera();
+  imgCanvas.getContext('2d').clearRect(0, 0, imgCanvas.width, imgCanvas.height);
+  boxCanvas.getContext('2d').clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+  imgCanvas.width = imgCanvas.height = boxCanvas.width = boxCanvas.height = 0;
+  emptyStage.classList.remove('hidden');
+  btnRunAnalyze.disabled = true;
+  resultTable.classList.add('hidden');
+  resultMeta.textContent = 'Results will appear here after running analysis.';
+  mismatchNote.classList.add('hidden');
+  mismatchNote.innerHTML = '';
+  cropsWrap.classList.add('hidden');
+  setStatus('');
+});
+</script>
+</body>
+</html>

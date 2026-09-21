@@ -25,6 +25,8 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
 
+import tube_emboss_pipeline
+
 FIELD_PATTERNS_PATH = Path(__file__).parent / "field_patterns.json"
 
 # Same threshold used for the Gemini Vision fallback in the real architecture.
@@ -52,6 +54,13 @@ ocr_engine = PaddleOCR(
     enable_mkldnn=False,
 )
 print("PaddleOCR ready.")
+
+# Tube emboss sub-pipeline: YOLO11n tube detector, loaded once and reused
+# (same reasoning as ocr_engine above - reused across requests, not
+# reloaded per-request, and NOT a second PaddleOCR instance).
+print("Loading tube detector (YOLO11n), please wait...")
+tube_yolo_model = tube_emboss_pipeline.load_yolo_model()
+print("Tube detector ready.")
 
 
 def load_field_patterns():
@@ -172,3 +181,50 @@ async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
         "detection_count": len(detections),
         "detections": detections,
     }
+
+
+@app.get("/api/tube-emboss/field-types")
+def tube_emboss_field_types():
+    """Lets the tube emboss test page build its field_type dropdown from
+    emboss_format_patterns.json instead of hardcoding field names in JS."""
+    config = tube_emboss_pipeline.load_emboss_format_patterns()
+    return [
+        {
+            "key": key,
+            "label": cfg.get("label", key),
+            "description": cfg.get("description"),
+            "expected_length": len(cfg.get("charset", [])) or None,
+        }
+        for key, cfg in config.items()
+    ]
+
+
+@app.post("/api/tube-emboss/analyze")
+async def tube_emboss_analyze(
+    file: UploadFile = File(...),
+    request_id: str = Form(...),
+    field_type: str = Form(None),
+    debug: bool = Form(False),
+):
+    """Tube emboss code sub-pipeline: YOLO11n localization -> crimp-area
+    crop -> PaddleOCR -> format validation. See tube_emboss_pipeline.py.
+    Still never decides PASS/FAIL/REVIEW - that stays in Laravel."""
+    raw_bytes = await file.read()
+    np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
+    image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return {"error": "Could not decode image. Unsupported or corrupt file."}
+
+    start = time.time()
+    result = tube_emboss_pipeline.analyze_tube_emboss(
+        image,
+        field_type=field_type or tube_emboss_pipeline.DEFAULT_FIELD_TYPE,
+        request_id=request_id,
+        ocr_engine=ocr_engine,
+        yolo_model=tube_yolo_model,
+        debug=debug,
+        image_ref=file.filename or "unknown",
+    )
+    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    return result
