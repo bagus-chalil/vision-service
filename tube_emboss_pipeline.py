@@ -5,13 +5,15 @@ Three stages, in order:
   1. YOLO11n localization (best.pt) -> crop to tube bbox -> crop again to the
      top ~15% of that crop (crimp seal area, where the date/batch code is
      embossed). If 0 tubes detected or confidence too low, stop before OCR.
-  2. PaddleOCR recognition on the crimp crop, run twice via
-     recognize_crimp_text_dual() - once on the raw crop, once on a
-     sharpened/contrast-enhanced version (preprocess_crimp_for_ocr()) - and
-     cross-validated: agreement -> trust it, disagreement -> confidence is
-     capped so it always routes to LOW_CONFIDENCE rather than picking a side
-     blindly. Reuses the PaddleOCR instance already loaded in main.py - do
-     not construct a second one, model load is slow and doubles memory.
+  2. PaddleOCR recognition on the crimp crop via recognize_crimp_text_dual().
+     Raw pass first; if its confidence is already below
+     GEMINI_FALLBACK_THRESHOLD, stop there (LOW_CONFIDENCE either way, second
+     pass would only add latency). Otherwise also run a sharpened/
+     contrast-enhanced pass (preprocess_crimp_for_ocr()) and cross-validate:
+     agreement -> trust it, disagreement -> confidence is capped so it always
+     routes to LOW_CONFIDENCE rather than picking a side blindly. Reuses the
+     PaddleOCR instance already loaded in main.py - do not construct a second
+     one, model load is slow and doubles memory.
   3. Format validation against emboss_format_patterns.json. Same hard rule
      as the document-OCR pipeline: never strip/trim/guess-correct OCR text.
      A length or per-position charset mismatch always flags FORMAT_MISMATCH,
@@ -179,13 +181,35 @@ def recognize_crimp_text_dual(crimp_crop, ocr_engine) -> dict:
 
     This never edits characters within either OCR pass - it only chooses
     between two complete, untouched OCR outputs.
+
+    Skips the sharpened pass entirely when the raw pass already scores below
+    GEMINI_FALLBACK_THRESHOLD: at that confidence the request routes to
+    LOW_CONFIDENCE regardless of what the sharpened pass says, so the second
+    OCR call (the dominant cost of this function - see diagnose_sharpening_ab.py)
+    would only add latency, never change the outcome. Measured on 18 real
+    samples: this covers ~1/3 of requests with zero loss of the disagreement
+    check's value, since the cases it actually catches (a confident misread
+    that would otherwise slip through as OK) only occur when raw confidence
+    is already >= threshold.
     """
     raw_result = recognize_crimp_text(crimp_crop, ocr_engine)
-    sharpened_crop = preprocess_crimp_for_ocr(crimp_crop)
-    sharp_result = recognize_crimp_text(sharpened_crop, ocr_engine)
-
     raw_text = raw_result.get("text") if raw_result["detected"] else None
     raw_conf = raw_result.get("confidence") if raw_result["detected"] else None
+
+    if raw_text is not None and raw_conf < GEMINI_FALLBACK_THRESHOLD:
+        return {
+            "detected": True,
+            "text": raw_text,
+            "confidence": raw_conf,
+            "agreement": None,
+            "raw_text": raw_text,
+            "raw_confidence": raw_conf,
+            "sharpened_text": None,
+            "sharpened_confidence": None,
+        }
+
+    sharpened_crop = preprocess_crimp_for_ocr(crimp_crop)
+    sharp_result = recognize_crimp_text(sharpened_crop, ocr_engine)
     sharp_text = sharp_result.get("text") if sharp_result["detected"] else None
     sharp_conf = sharp_result.get("confidence") if sharp_result["detected"] else None
 
@@ -407,7 +431,7 @@ def analyze_tube_emboss(
             reasons.append("LOW_CONFIDENCE")
         if format_valid is False:
             reasons.append("FORMAT_MISMATCH")
-        if not ocr_agreement:
+        if ocr_agreement is False:
             reasons.append("OCR_DISAGREEMENT")
         log_fallback_case(
             request_id=request_id,
