@@ -56,6 +56,23 @@ DEFAULT_FIELD_TYPE = "tube_emboss_default"
 # this, we don't even attempt OCR - route straight to REVIEW/RESCAN.
 YOLO_MIN_CONFIDENCE = 0.25
 
+# Minimum confidence to trust the tube bbox specifically on the label_anchor
+# path (analyze_label_anchor_field) - deliberately higher than
+# YOLO_MIN_CONFIDENCE. Added 2026-09-24 after a real sample (yellow bottle
+# cap, "EXP.150728 TU") got a weak 41.6% "tube" detection that actually
+# boxed an unrelated blurry background object, not the cap - the crop fed to
+# OCR excluded the real text entirely (raw_ocr_text came back empty) even
+# though the label_anchor path's whole-frame fallback (see module docstring)
+# would have found it fine. On this path a false-accept is strictly worse
+# than a false-reject: rejecting just means searching the whole frame
+# instead (still robust, since anchor search doesn't depend on a precise
+# crop), while accepting a wrong low-confidence bbox throws away the region
+# that actually has the text. The tube detector was never trained on caps,
+# so a weak score there is noise, not signal - unlike the default
+# tube_emboss_default path where a wrong bbox is fatal either way, so its
+# lower bar (just "is this worth attempting OCR at all") still makes sense.
+LABEL_ANCHOR_MIN_TUBE_CONFIDENCE = 0.5
+
 # Crimp seal area = top fraction of the tube crop (emboss code lives on the
 # tube shoulder/crimp, near the top of the cropped tube).
 CRIMP_CROP_TOP_FRACTION = 0.15
@@ -74,6 +91,15 @@ GEMINI_FALLBACK_THRESHOLD = 0.85
 # - re.search (not fullmatch) anchored on the literal label is what lets this
 # survive that surrounding noise without ever touching the 6 matched digits.
 LABEL_ANCHOR_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{6}})"
+
+# Dotted format (added 2026-09-24, printed body-label sample e.g.
+# "EXP: 27.01.2029"): day.month.year with a 4-digit year instead of the
+# compact 6-digit run above - printed labels sometimes spell the year in
+# full rather than the tube-emboss convention of 2 digits. The year is
+# restricted to 20xx: if the OCR'd year doesn't start with "20" this pattern
+# simply doesn't match at all (never forced/guessed) rather than assuming a
+# century. Separator between day/month/year may be ".", "-", or "/".
+LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{2}})[.\-/](\d{{2}})[.\-/](20\d{{2}})"
 
 
 def load_yolo_model(model_path: Path = TUBE_DETECTOR_PATH) -> YOLO:
@@ -230,22 +256,95 @@ def find_label_anchor_match(pieces: list, label: str) -> dict:
     strips, or guesses at the digits themselves, so it doesn't violate the
     never-auto-correct-OCR-text rule.
 
+    Tries the compact 6-digit pattern first, then - only if that doesn't
+    match within a given piece - the dotted DD.MM.YYYY pattern (see
+    LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE), normalizing the match to the same
+    6-char day+month+year(last 2 digits) shape validate_emboss_format()
+    expects. That truncation only ever drops the literal "20" century digits
+    that pattern itself requires to match in the first place - it never
+    edits or guesses at the day/month/year digits that carry the actual
+    reported date, and matched_text still carries the full untouched OCR
+    text (e.g. "EXP: 27.01.2029") for a human reviewer to see.
+
     Returns {"matched": False} if no piece contains the label, or
     {"matched": False, "ambiguous": True, "candidates": [...]} if multiple
     pieces match with DIFFERENT 6-digit codes - never silently pick one.
     Pieces matching with the same code (e.g. duplicate detections) resolve to
     the single highest-confidence match.
     """
-    pattern = re.compile(LABEL_ANCHOR_PATTERN_TEMPLATE.format(label=re.escape(label)), re.IGNORECASE)
+    compact_pattern = re.compile(LABEL_ANCHOR_PATTERN_TEMPLATE.format(label=re.escape(label)), re.IGNORECASE)
+    dotted_pattern = re.compile(LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE.format(label=re.escape(label)), re.IGNORECASE)
     hits = []
     for piece in pieces:
-        m = pattern.search(piece["text"])
+        m = compact_pattern.search(piece["text"])
         if m:
             hits.append({
                 "matched_text": piece["text"],
                 "extracted_digits": m.group(1),
                 "confidence": piece["confidence"],
+                "date_format": "compact_6digit",
             })
+            continue
+        m = dotted_pattern.search(piece["text"])
+        if m:
+            day, month, year4 = m.group(1), m.group(2), m.group(3)
+            hits.append({
+                "matched_text": piece["text"],
+                "extracted_digits": day + month + year4[-2:],
+                "confidence": piece["confidence"],
+                "date_format": "dotted_4digit_year",
+            })
+
+    if not hits:
+        return {"matched": False}
+
+    distinct_codes = {h["extracted_digits"] for h in hits}
+    if len(distinct_codes) > 1:
+        return {"matched": False, "ambiguous": True, "candidates": hits}
+
+    best = max(hits, key=lambda h: h["confidence"])
+    return {
+        "matched": True,
+        "matched_text": best["matched_text"],
+        "extracted_digits": best["extracted_digits"],
+        "confidence": round(best["confidence"], 4),
+        "date_format": best["date_format"],
+    }
+
+
+def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
+    """Fallback for label_anchor fields when no literal label is found at all
+    in either OCR pass (see recognize_label_anchor_dual). Added 2026-09-24
+    after a real sample tube cap ("AJA120927 PU") turned out to have no "EXP"
+    text anywhere near its date - a different physical emboss layout than the
+    three samples that motivated the label_anchor approach in the first
+    place (see emboss_format_patterns.json's tube_exp_date entry).
+
+    Searches each OCR piece for an isolated 6-digit run - (?<!\\d) / (?!\\d)
+    guards mean a run that's actually part of a longer digit sequence (e.g.
+    tube_emboss_default's 10-char MFD+batch+mfg code) never gets truncated
+    into a false 6-digit match - and keeps only runs that pass this
+    field_type's own day/month/year int_range validation (rejects clearly-
+    wrong candidates like month=88). Never invents or edits digits, exactly
+    like find_label_anchor_match() - it only decides which already-detected
+    run to trust. Multiple distinct valid candidates -> ambiguous, same
+    never-guess rule as the label-anchor path.
+
+    This is inherently less certain than a literal label match (no "EXP" to
+    anchor on), so the caller always caps the returned confidence below
+    GEMINI_FALLBACK_THRESHOLD - a digit-fallback match can never come back as
+    a confident OK, only LOW_CONFIDENCE for human review."""
+    digit_pattern = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+    hits = []
+    for piece in pieces:
+        for m in digit_pattern.finditer(piece["text"]):
+            digits = m.group(1)
+            if validate_emboss_format(digits, format_cfg)["format_valid"]:
+                hits.append({
+                    "matched_text": piece["text"],
+                    "extracted_digits": digits,
+                    "confidence": piece["confidence"],
+                })
 
     if not hits:
         return {"matched": False}
@@ -263,7 +362,7 @@ def find_label_anchor_match(pieces: list, label: str) -> dict:
     }
 
 
-def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
+def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: dict) -> dict:
     """Label-anchor equivalent of recognize_crimp_text_dual(): runs the
     anchor search on the raw image, and - unless that raw pass already
     resolved with a confident match - also on preprocess_crimp_for_ocr()'s
@@ -272,8 +371,10 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
     (including only one side matching at all) -> never silently pick a side;
     take the higher-confidence match but cap the returned confidence just
     under GEMINI_FALLBACK_THRESHOLD so the caller always routes it to
-    LOW_CONFIDENCE. Neither side matches -> not detected (caller reports
-    FORMAT_MISMATCH / label not found)."""
+    LOW_CONFIDENCE. Neither side matches the label at all -> try
+    find_digit_fallback_match() across both passes' pieces before giving up
+    (see that function's docstring); still not detected -> caller reports
+    FORMAT_MISMATCH / label not found."""
     raw_pieces = ocr_text_pieces(image_bgr, ocr_engine)
     raw_match = find_label_anchor_match(raw_pieces, label)
 
@@ -284,6 +385,8 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
             "extracted_digits": raw_match["extracted_digits"],
             "confidence": raw_match["confidence"],
             "agreement": None,
+            "match_method": "label_anchor",
+            "date_format": raw_match["date_format"],
             "all_detected_text": "".join(p["text"] for p in raw_pieces),
         }
 
@@ -294,11 +397,26 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
     all_detected_text = "".join(p["text"] for p in raw_pieces) or "".join(p["text"] for p in sharp_pieces)
 
     if not raw_match.get("matched") and not sharp_match.get("matched"):
+        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg)
+        if fallback_match.get("matched"):
+            capped_confidence = min(fallback_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
+            return {
+                "detected": True,
+                "text": fallback_match["matched_text"],
+                "extracted_digits": fallback_match["extracted_digits"],
+                "confidence": round(capped_confidence, 4),
+                "agreement": None,
+                "match_method": "digit_fallback",
+                "date_format": None,
+                "all_detected_text": all_detected_text,
+            }
         return {
             "detected": False,
             "all_detected_text": all_detected_text,
             "ambiguous": raw_match.get("ambiguous", False) or sharp_match.get("ambiguous", False),
             "candidates": raw_match.get("candidates") or sharp_match.get("candidates") or [],
+            "digit_fallback_ambiguous": fallback_match.get("ambiguous", False),
+            "digit_fallback_candidates": fallback_match.get("candidates", []),
         }
 
     agreement = (
@@ -313,6 +431,8 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
             "extracted_digits": raw_match["extracted_digits"],
             "confidence": round(max(raw_match["confidence"], sharp_match["confidence"]), 4),
             "agreement": True,
+            "match_method": "label_anchor",
+            "date_format": raw_match["date_format"],
             "all_detected_text": all_detected_text,
         }
 
@@ -326,6 +446,8 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
         "extracted_digits": best["extracted_digits"],
         "confidence": round(capped_confidence, 4),
         "agreement": False,
+        "match_method": "label_anchor",
+        "date_format": best["date_format"],
         "all_detected_text": all_detected_text,
     }
 
@@ -580,15 +702,28 @@ def analyze_label_anchor_field(
     clutter, but - unlike analyze_tube_emboss()'s default path - doesn't hard
     fail when no tube is detected: real EXP samples also come from bottle
     caps and printed labels that the tube detector never will (and was never
-    trained to) recognize, so this falls back to searching the whole frame."""
-    localization = localize_tube(image_bgr, yolo_model)
+    trained to) recognize, so this falls back to searching the whole frame.
+
+    Uses LABEL_ANCHOR_MIN_TUBE_CONFIDENCE (higher than the default path's
+    YOLO_MIN_CONFIDENCE) to decide whether to trust the bbox at all - see
+    that constant's comment for why a false-accept here is worse than a
+    false-reject, unlike the default path."""
+    localization = localize_tube(image_bgr, yolo_model, min_confidence=LABEL_ANCHOR_MIN_TUBE_CONFIDENCE)
     search_image = localization["tube_crop"] if localization["detected"] else image_bgr
     tube_detection_confidence = localization.get("confidence")
 
-    ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor)
+    ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor, format_cfg)
 
     if not ocr_result["detected"]:
-        reason = "LABEL_AMBIGUOUS" if ocr_result.get("ambiguous") else "LABEL_NOT_FOUND"
+        if ocr_result.get("digit_fallback_ambiguous"):
+            reason = "DIGIT_FALLBACK_AMBIGUOUS"
+            reason_detail = "no literal label match, and multiple isolated 6-digit candidates pass format validation - see candidates"
+        elif ocr_result.get("ambiguous"):
+            reason = "LABEL_AMBIGUOUS"
+            reason_detail = f"multiple '{label_anchor}' matches with different dates - see candidates"
+        else:
+            reason = "LABEL_NOT_FOUND"
+            reason_detail = f"label '{label_anchor}' not found in OCR text, and no valid 6-digit fallback candidate either"
         raw_text = ocr_result.get("all_detected_text") or None
         validation = {
             "format_valid": False,
@@ -596,9 +731,9 @@ def analyze_label_anchor_field(
             "expected_length": None,
             "actual_length": len(raw_text) if raw_text else 0,
             "block_mismatches": [],
-            "reason": f"label '{label_anchor}' not found in OCR text" if reason == "LABEL_NOT_FOUND"
-                      else f"multiple '{label_anchor}' matches with different dates - see candidates",
+            "reason": reason_detail,
         }
+        all_candidates = ocr_result.get("candidates", []) + ocr_result.get("digit_fallback_candidates", [])
         log_fallback_case(
             request_id=request_id,
             field_type=resolved_field_type,
@@ -611,7 +746,7 @@ def analyze_label_anchor_field(
             reasons=[reason],
             validation=validation,
             ocr_agreement=None,
-            candidates=ocr_result.get("candidates", []),
+            candidates=all_candidates,
         )
         result = {
             "request_id": request_id,
@@ -630,7 +765,7 @@ def analyze_label_anchor_field(
             result["debug"] = {
                 "tube_bbox": localization.get("bbox"),
                 "search_image_base64": _encode_debug_image(search_image),
-                "candidates": ocr_result.get("candidates", []),
+                "candidates": all_candidates,
             }
         return result
 
@@ -673,6 +808,7 @@ def analyze_label_anchor_field(
             reasons=reasons,
             validation=validation,
             ocr_agreement=ocr_agreement,
+            match_method=ocr_result.get("match_method"),
         )
 
     result = {
@@ -685,6 +821,8 @@ def analyze_label_anchor_field(
         "status": status,
         "engine_used": engine_used,
         "ocr_agreement": ocr_agreement,
+        "match_method": ocr_result.get("match_method"),
+        "date_format": ocr_result.get("date_format"),
         "validation": validation,
         "tube_detection_confidence": tube_detection_confidence,
         "date_check": check_reference_date(extracted_digits, format_cfg, format_valid, reference_date),
