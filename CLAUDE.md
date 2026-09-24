@@ -151,6 +151,32 @@ Endpoint `main.py`:
    cuma jalan kalau `format_valid` True dulu (FORMAT_MISMATCH selalu skip
    date_check, gapeduli reference_date-nya ada) — tetap flag data doang,
    Vision Service tetap tidak pernah mutuskan match/mismatch jadi PASS/FAIL.
+10. **`tube_exp_date` pindah dari fixed-crop-position ke `label_anchor`
+    (2026-09-24)** — crimp-crop top-15%-of-tube-bbox (`CRIMP_CROP_TOP_FRACTION`)
+    framing-dependent: dari sample foto asli user, crop itu ikut menelan baris
+    body-text kemasan ("EXP 051228" jadi kebaca gabung sama
+    "Elsheskin Barrier+pH Balance..." → FORMAT_MISMATCH walau confidence
+    tinggi). Fix: field_type dengan `"label_anchor": "EXP"` di
+    `emboss_format_patterns.json` sekarang lewat jalur baru
+    (`analyze_label_anchor_field()` / `find_label_anchor_match()` di
+    `tube_emboss_pipeline.py`) — OCR seluruh area (tube crop kalau YOLO
+    detect tube, fallback ke full frame kalau tidak — EXP juga muncul di tutup
+    botol bulat yang YOLO tube-detector tidak akan pernah kenali), lalu cari
+    per-region (bukan gabungan/concat semua region) teks yang match
+    `EXP\.?\s*:?\s*(\d{6})` - ini yang bikin batch/lot code sebelum "EXP"
+    (`"FJZ EXP.130927"`) atau suffix code sesudah 6 digit (`"EXP.150728 TU"`)
+    gak ikut ngerusak match, tanpa pernah strip/edit 6 digit yang match.
+    Confirmed fix di sample Elsheskin tube asli (raw text jadi bersih
+    `"EXP 210428"`, confidence 99.8%). **Known gap**: kalau baris EXP dan MFD
+    di-emboss BERDEKATAN banget (sample Pond's UV Protect, 2026-09-24),
+    PaddleOCR text-DETECTION-nya sendiri (bukan recognition) kadang
+    menggabungkan 2 baris itu jadi SATU region sebelum OCR sempat
+    baca — `label_anchor` search gak bisa misahin lagi kalau sudah kegabung di
+    level ini. Perbaikan butuh instance PaddleOCR kedua dengan
+    `text_det_unclip_ratio` lebih kecil (constructor-only param, tidak bisa
+    di-override per-call di `predict()`), yang bentrok sama constraint
+    "jangan construct PaddleOCR dua kali" di `main.py` — belum digarap,
+    next step kalau kasus ini kejadian di produksi.
 
 ## Status / progress log
 
@@ -178,13 +204,16 @@ Endpoint `main.py`:
       alur: QC input tanggal mixing (ground-truth, dikonversi ke DDMMYY di
       frontend dari `<input type=date>`) → OCR baca EXP → kalau format_valid,
       dibandingkan exact-match ke reference_date. Ditambahkan di
-      `index.html` + `tube_emboss.html`. Belum diuji ke foto real "gambar
-      lengkap" (foto tangan-pegang-tube seperti yang di-share user
-      2026-09-24) — YOLO+crimp-crop (`CRIMP_CROP_TOP_FRACTION`) masih
-      di-tuning dari sample foto lama yang framing-nya lebih dekat/rapat;
-      foto baru yang lebih lebar bikin crimp crop ikut kebawa teks body
-      kemasan (lihat item 9 di Key technical gotchas) — localization
-      tuning buat foto lengkap ini next step, belum scope sekarang
+      `index.html` + `tube_emboss.html`.
+- [x] `tube_exp_date` di-uji ke foto real "gambar lengkap" (2026-09-24) —
+      crimp-crop fixed-percentage ternyata framing-dependent (lihat item 9 &
+      10 di Key technical gotchas), diganti pendekatan `label_anchor`
+      (cari literal "EXP" + 6 digit per-region OCR result, bukan posisi crop
+      tetap). Confirmed fix di sample tube asli user. Known gap: baris
+      EXP+MFD yang di-emboss berdekatan (sample Pond's) masih bisa
+      ketelen jadi satu region oleh PaddleOCR text detector sebelum
+      `label_anchor` sempat misahin - butuh instance PaddleOCR kedua dengan
+      `text_det_unclip_ratio` lebih kecil, belum digarap (lihat item 10)
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada
@@ -219,3 +248,12 @@ Endpoint `main.py`:
 - Arsitektur (Laravel @ .23, Vision Service @ .24, PaddleOCR-only/no
   training, Fixed ROI + homography, Gemini fallback <80%, Lab delta-E untuk
   warna) sudah settled — jangan usulkan perubahan tanpa diminta eksplisit.
+- `field_type` **selalu dikirim sebagai parameter dari luar** (aplikasi
+  pemanggil/workflow context), Vision Service **tidak pernah** menebak
+  field_type dari isi foto (no image classification/auto-detect). Di
+  production nanti, React frontend yang tahu field_type dari step alur kerja
+  saat itu (user tinggal foto, gak perlu pilih apa-apa manual) — dropdown
+  field type di `index.html`/`tube_emboss.html` cuma alat testing prototype,
+  bukan bagian dari desain production. Alasan: auto-classify dari foto
+  berisiko salah pilih format validasi secara diam-diam (lebih parah dari
+  sekadar length-mismatch yang kelihatan jelas sebagai FORMAT_MISMATCH).

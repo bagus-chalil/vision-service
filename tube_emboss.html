@@ -339,6 +339,7 @@ function renderResult(data) {
     ['request_id', escapeHtml(data.request_id ?? '')],
     ['status', badgeHtml(data.status)],
     ['raw_ocr_text', data.raw_ocr_text ? `<b>${escapeHtml(data.raw_ocr_text)}</b>` : '<span class="field-desc">none</span>'],
+    ...(data.extracted_date_code ? [['extracted_date_code', `<b>${escapeHtml(data.extracted_date_code)}</b>`]] : []),
     ['confidence', confPct],
     ['format_valid', badgeHtml(data.format_valid)],
     ['engine_used', escapeHtml(data.engine_used ?? 'n/a')],

@@ -19,6 +19,19 @@ Three stages, in order:
      A length or per-position charset mismatch always flags FORMAT_MISMATCH,
      regardless of confidence.
 
+field_types that set "label_anchor" in emboss_format_patterns.json (currently
+tube_exp_date -> "EXP") skip steps 1-2 above and use a different, more
+robust path instead (recognize_label_anchor_dual() / find_label_anchor_match()):
+OCR the whole tube crop (or the whole frame if no tube was detected at all -
+real EXP codes also show up on bottle caps, not just tube crimps) and search
+each individually-detected text region for the label followed by 6 digits,
+rather than cropping to a fixed pixel percentage first and joining everything
+inside it into one blob. Added 2026-09-24 after real samples showed the old
+top-15%-of-tube-bbox crop was framing-dependent - it pulled in the wrong
+emboss line (MFD instead of EXP) or trailing printed body text depending on
+how close the tube was held to the camera, which the label anchor sidesteps
+by finding the code from its own printed label instead of its pixel position.
+
 This module never decides PASS/FAIL/REVIEW - it only returns
 text + confidence + status/flags. That decision lives in Laravel.
 """
@@ -50,6 +63,17 @@ CRIMP_CROP_TOP_FRACTION = 0.15
 # Separate from the document-OCR pipeline's 0.80 threshold (main.py) - this
 # sub-pipeline's spec calls for 0.85.
 GEMINI_FALLBACK_THRESHOLD = 0.85
+
+# Anchor-based extraction for field_types with "label_anchor" set in
+# emboss_format_patterns.json (currently tube_exp_date -> "EXP"). Matches the
+# label optionally followed by "." or ":" and/or whitespace, then exactly 6
+# digits, e.g. "EXP 210428", "EXP.150728", "EXP:210428". Built from real
+# sample photos (2026-09-24): EXP appears on tube crimps AND on bottle caps
+# and printed labels, sometimes preceded by an unrelated batch/lot code
+# ("FJZ EXP.130927") and/or followed by a short suffix code ("EXP.150728 TU")
+# - re.search (not fullmatch) anchored on the literal label is what lets this
+# survive that surrounding noise without ever touching the 6 matched digits.
+LABEL_ANCHOR_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{6}})"
 
 
 def load_yolo_model(model_path: Path = TUBE_DETECTOR_PATH) -> YOLO:
@@ -112,21 +136,37 @@ def localize_tube(image_bgr, yolo_model, min_confidence: float = YOLO_MIN_CONFID
     }
 
 
+# Only upscale inputs shorter than this (px) - see preprocess_crimp_for_ocr().
+UPSCALE_MAX_INPUT_HEIGHT = 400
+
+
 def preprocess_crimp_for_ocr(crimp_crop_bgr):
-    """Contrast-enhance + sharpen + upscale the crimp crop before OCR.
-    Emboss text has low native contrast (raised metal, not printed ink) and
-    the crimp crop is small (~200-280px tall) - this compensates for both.
-    Pixel-only transform, runs before OCR sees the image - does not touch
-    recognized text, so the never-strip/never-correct-text rule is untouched."""
+    """Contrast-enhance + sharpen (+ upscale, for small crops only) before
+    OCR. Emboss text has low native contrast (raised metal, not printed ink)
+    and the crimp crop is small (~200-280px tall) - this compensates for
+    both. Pixel-only transform, runs before OCR sees the image - does not
+    touch recognized text, so the never-strip/never-correct-text rule is
+    untouched.
+
+    The 2x upscale is skipped above UPSCALE_MAX_INPUT_HEIGHT: it's only
+    needed to give a tiny crimp crop enough pixels for OCR to work with.
+    Measured 2026-09-24 on the label_anchor path's whole-tube/whole-frame
+    fallback (see analyze_label_anchor_field()) - a 1280x720 input upscaled
+    to 2560x1440 took ~28s to OCR vs ~8s unscaled, a cost this preprocessing
+    was never designed to pay and printed ink text (unlike embossed metal)
+    doesn't need anyway."""
     gray = cv2.cvtColor(crimp_crop_bgr, cv2.COLOR_BGR2GRAY)
     denoised = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
 
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     contrast_enhanced = clahe.apply(denoised)
 
-    upscaled = cv2.resize(
-        contrast_enhanced, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
-    )
+    if contrast_enhanced.shape[0] <= UPSCALE_MAX_INPUT_HEIGHT:
+        upscaled = cv2.resize(
+            contrast_enhanced, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
+        )
+    else:
+        upscaled = contrast_enhanced
 
     blurred = cv2.GaussianBlur(upscaled, (0, 0), sigmaX=1.0)
     sharpened = cv2.addWeighted(upscaled, 1.5, blurred, -0.5, 0)
@@ -134,12 +174,15 @@ def preprocess_crimp_for_ocr(crimp_crop_bgr):
     return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 
-def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
-    """Stage 2: PaddleOCR on the crimp crop. If PaddleOCR splits the code
-    into multiple text detections, join them in reading order (top-to-bottom,
-    left-to-right) - this only reorders/concatenates separate detections, it
-    never edits characters within a detection."""
-    results = ocr_engine.predict(input=crimp_crop)
+def ocr_text_pieces(image_bgr, ocr_engine) -> list:
+    """Runs PaddleOCR once and returns each detected text region as its own
+    piece {"text", "confidence"}, in reading order (top-to-bottom,
+    left-to-right by box centroid) - no joining/concatenation. Shared by
+    recognize_crimp_text() (which joins pieces back into one code) and the
+    label-anchor search (which must evaluate each detected region on its own,
+    see find_label_anchor_match()) so a piece of unrelated printed text next
+    to the code can never get glued onto it."""
+    results = ocr_engine.predict(input=image_bgr)
 
     texts, scores, polys = [], [], []
     for res in results:
@@ -148,21 +191,142 @@ def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
         polys.extend(res.get("rec_polys", []))
 
     if not texts:
-        return {"detected": False}
+        return []
 
     def centroid(poly):
         arr = np.array(poly)
         return (float(arr[:, 1].mean()), float(arr[:, 0].mean()))
 
     order = sorted(range(len(texts)), key=lambda i: centroid(polys[i]))
-    combined_text = "".join(texts[i] for i in order)
-    combined_confidence = min(float(scores[i]) for i in order)
+    return [{"text": texts[i], "confidence": float(scores[i])} for i in order]
+
+
+def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
+    """Stage 2: PaddleOCR on the crimp crop. If PaddleOCR splits the code
+    into multiple text detections, join them in reading order (top-to-bottom,
+    left-to-right) - this only reorders/concatenates separate detections, it
+    never edits characters within a detection."""
+    pieces = ocr_text_pieces(crimp_crop, ocr_engine)
+    if not pieces:
+        return {"detected": False}
+
+    combined_text = "".join(p["text"] for p in pieces)
+    combined_confidence = min(p["confidence"] for p in pieces)
 
     return {
         "detected": True,
         "text": combined_text,
         "confidence": round(combined_confidence, 4),
-        "piece_count": len(texts),
+        "piece_count": len(pieces),
+    }
+
+
+def find_label_anchor_match(pieces: list, label: str) -> dict:
+    """Searches each OCR piece independently (never a joined blob - see
+    ocr_text_pieces()) for `label` followed by exactly 6 digits, e.g. "EXP" ->
+    matches "EXP 210428" within a piece that also contains other text before
+    or after. re.search only locates where the 6-digit code starts within a
+    piece that already exists as one atomic OCR detection - it never edits,
+    strips, or guesses at the digits themselves, so it doesn't violate the
+    never-auto-correct-OCR-text rule.
+
+    Returns {"matched": False} if no piece contains the label, or
+    {"matched": False, "ambiguous": True, "candidates": [...]} if multiple
+    pieces match with DIFFERENT 6-digit codes - never silently pick one.
+    Pieces matching with the same code (e.g. duplicate detections) resolve to
+    the single highest-confidence match.
+    """
+    pattern = re.compile(LABEL_ANCHOR_PATTERN_TEMPLATE.format(label=re.escape(label)), re.IGNORECASE)
+    hits = []
+    for piece in pieces:
+        m = pattern.search(piece["text"])
+        if m:
+            hits.append({
+                "matched_text": piece["text"],
+                "extracted_digits": m.group(1),
+                "confidence": piece["confidence"],
+            })
+
+    if not hits:
+        return {"matched": False}
+
+    distinct_codes = {h["extracted_digits"] for h in hits}
+    if len(distinct_codes) > 1:
+        return {"matched": False, "ambiguous": True, "candidates": hits}
+
+    best = max(hits, key=lambda h: h["confidence"])
+    return {
+        "matched": True,
+        "matched_text": best["matched_text"],
+        "extracted_digits": best["extracted_digits"],
+        "confidence": round(best["confidence"], 4),
+    }
+
+
+def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str) -> dict:
+    """Label-anchor equivalent of recognize_crimp_text_dual(): runs the
+    anchor search on the raw image, and - unless that raw pass already
+    resolved with a confident match - also on preprocess_crimp_for_ocr()'s
+    sharpened version, then cross-validates the two extracted 6-digit codes.
+    Agreement -> trust it (confidence = higher of the two). Disagreement
+    (including only one side matching at all) -> never silently pick a side;
+    take the higher-confidence match but cap the returned confidence just
+    under GEMINI_FALLBACK_THRESHOLD so the caller always routes it to
+    LOW_CONFIDENCE. Neither side matches -> not detected (caller reports
+    FORMAT_MISMATCH / label not found)."""
+    raw_pieces = ocr_text_pieces(image_bgr, ocr_engine)
+    raw_match = find_label_anchor_match(raw_pieces, label)
+
+    if raw_match.get("matched") and raw_match["confidence"] >= GEMINI_FALLBACK_THRESHOLD:
+        return {
+            "detected": True,
+            "text": raw_match["matched_text"],
+            "extracted_digits": raw_match["extracted_digits"],
+            "confidence": raw_match["confidence"],
+            "agreement": None,
+            "all_detected_text": "".join(p["text"] for p in raw_pieces),
+        }
+
+    sharpened = preprocess_crimp_for_ocr(image_bgr)
+    sharp_pieces = ocr_text_pieces(sharpened, ocr_engine)
+    sharp_match = find_label_anchor_match(sharp_pieces, label)
+
+    all_detected_text = "".join(p["text"] for p in raw_pieces) or "".join(p["text"] for p in sharp_pieces)
+
+    if not raw_match.get("matched") and not sharp_match.get("matched"):
+        return {
+            "detected": False,
+            "all_detected_text": all_detected_text,
+            "ambiguous": raw_match.get("ambiguous", False) or sharp_match.get("ambiguous", False),
+            "candidates": raw_match.get("candidates") or sharp_match.get("candidates") or [],
+        }
+
+    agreement = (
+        raw_match.get("matched") and sharp_match.get("matched")
+        and raw_match["extracted_digits"] == sharp_match["extracted_digits"]
+    )
+
+    if agreement:
+        return {
+            "detected": True,
+            "text": raw_match["matched_text"],
+            "extracted_digits": raw_match["extracted_digits"],
+            "confidence": round(max(raw_match["confidence"], sharp_match["confidence"]), 4),
+            "agreement": True,
+            "all_detected_text": all_detected_text,
+        }
+
+    candidates = [m for m in (raw_match, sharp_match) if m.get("matched")]
+    best = max(candidates, key=lambda m: m["confidence"])
+    capped_confidence = min(best["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
+
+    return {
+        "detected": True,
+        "text": best["matched_text"],
+        "extracted_digits": best["extracted_digits"],
+        "confidence": round(capped_confidence, 4),
+        "agreement": False,
+        "all_detected_text": all_detected_text,
     }
 
 
@@ -398,6 +562,144 @@ def log_fallback_case(**fields) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def analyze_label_anchor_field(
+    image_bgr,
+    *,
+    label_anchor: str,
+    format_cfg: dict,
+    resolved_field_type: str,
+    request_id: str,
+    ocr_engine,
+    yolo_model,
+    debug: bool = False,
+    image_ref: str = "unknown",
+    reference_date: str = None,
+) -> dict:
+    """Anchor-based path for field_types with "label_anchor" set (see module
+    docstring). Tries YOLO tube localization first to cut out background
+    clutter, but - unlike analyze_tube_emboss()'s default path - doesn't hard
+    fail when no tube is detected: real EXP samples also come from bottle
+    caps and printed labels that the tube detector never will (and was never
+    trained to) recognize, so this falls back to searching the whole frame."""
+    localization = localize_tube(image_bgr, yolo_model)
+    search_image = localization["tube_crop"] if localization["detected"] else image_bgr
+    tube_detection_confidence = localization.get("confidence")
+
+    ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor)
+
+    if not ocr_result["detected"]:
+        reason = "LABEL_AMBIGUOUS" if ocr_result.get("ambiguous") else "LABEL_NOT_FOUND"
+        raw_text = ocr_result.get("all_detected_text") or None
+        validation = {
+            "format_valid": False,
+            "validation_status": "FORMAT_MISMATCH",
+            "expected_length": None,
+            "actual_length": len(raw_text) if raw_text else 0,
+            "block_mismatches": [],
+            "reason": f"label '{label_anchor}' not found in OCR text" if reason == "LABEL_NOT_FOUND"
+                      else f"multiple '{label_anchor}' matches with different dates - see candidates",
+        }
+        log_fallback_case(
+            request_id=request_id,
+            field_type=resolved_field_type,
+            image_ref=image_ref,
+            raw_ocr_text=raw_text,
+            confidence=None,
+            engine_used="paddleocr",
+            status="LOW_CONFIDENCE",
+            format_valid=False,
+            reasons=[reason],
+            validation=validation,
+            ocr_agreement=None,
+            candidates=ocr_result.get("candidates", []),
+        )
+        result = {
+            "request_id": request_id,
+            "field_type": resolved_field_type,
+            "raw_ocr_text": raw_text,
+            "confidence": None,
+            "format_valid": False,
+            "status": "LOW_CONFIDENCE",
+            "error_reason": reason,
+            "engine_used": "paddleocr",
+            "validation": validation,
+            "tube_detection_confidence": tube_detection_confidence,
+            "date_check": check_reference_date(None, format_cfg, None, reference_date),
+        }
+        if debug:
+            result["debug"] = {
+                "tube_bbox": localization.get("bbox"),
+                "search_image_base64": _encode_debug_image(search_image),
+                "candidates": ocr_result.get("candidates", []),
+            }
+        return result
+
+    raw_text = ocr_result["text"]
+    extracted_digits = ocr_result["extracted_digits"]
+    confidence = ocr_result["confidence"]
+    ocr_agreement = ocr_result["agreement"]
+    engine_used = "paddleocr"
+
+    if confidence < GEMINI_FALLBACK_THRESHOLD:
+        gemini_result = gemini_vision_fallback_stub(search_image, resolved_field_type)
+        if gemini_result is not None:
+            raw_text = gemini_result["text"]
+            extracted_digits = gemini_result["text"]
+            confidence = gemini_result["confidence"]
+            engine_used = "gemini_fallback"
+
+    validation = validate_emboss_format(extracted_digits, format_cfg)
+    format_valid = validation["format_valid"]
+    status = "LOW_CONFIDENCE" if confidence < GEMINI_FALLBACK_THRESHOLD else "OK"
+
+    if status == "LOW_CONFIDENCE" or format_valid is False:
+        reasons = []
+        if status == "LOW_CONFIDENCE":
+            reasons.append("LOW_CONFIDENCE")
+        if format_valid is False:
+            reasons.append("FORMAT_MISMATCH")
+        if ocr_agreement is False:
+            reasons.append("OCR_DISAGREEMENT")
+        log_fallback_case(
+            request_id=request_id,
+            field_type=resolved_field_type,
+            image_ref=image_ref,
+            raw_ocr_text=raw_text,
+            extracted_digits=extracted_digits,
+            confidence=confidence,
+            engine_used=engine_used,
+            status=status,
+            format_valid=format_valid,
+            reasons=reasons,
+            validation=validation,
+            ocr_agreement=ocr_agreement,
+        )
+
+    result = {
+        "request_id": request_id,
+        "field_type": resolved_field_type,
+        "raw_ocr_text": raw_text,
+        "extracted_date_code": extracted_digits,
+        "confidence": confidence,
+        "format_valid": format_valid,
+        "status": status,
+        "engine_used": engine_used,
+        "ocr_agreement": ocr_agreement,
+        "validation": validation,
+        "tube_detection_confidence": tube_detection_confidence,
+        "date_check": check_reference_date(extracted_digits, format_cfg, format_valid, reference_date),
+    }
+
+    if debug:
+        result["debug"] = {
+            "tube_bbox": localization.get("bbox"),
+            "search_image_base64": _encode_debug_image(search_image),
+            "all_detected_text": ocr_result.get("all_detected_text"),
+        }
+
+    return result
+
+
 def analyze_tube_emboss(
     image_bgr,
     *,
@@ -416,6 +718,21 @@ def analyze_tube_emboss(
     format_config = load_emboss_format_patterns()
     resolved_field_type = field_type if field_type in format_config else DEFAULT_FIELD_TYPE
     format_cfg = format_config.get(resolved_field_type, {})
+
+    label_anchor = format_cfg.get("label_anchor")
+    if label_anchor:
+        return analyze_label_anchor_field(
+            image_bgr,
+            label_anchor=label_anchor,
+            format_cfg=format_cfg,
+            resolved_field_type=resolved_field_type,
+            request_id=request_id,
+            ocr_engine=ocr_engine,
+            yolo_model=yolo_model,
+            debug=debug,
+            image_ref=image_ref,
+            reference_date=reference_date,
+        )
 
     localization = localize_tube(image_bgr, yolo_model)
 
