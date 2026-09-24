@@ -70,6 +70,10 @@
     <select id="fieldTypeSelect"><option value="">Loading...</option></select>
     <div class="field-desc" id="fieldTypeDesc"></div>
 
+    <label class="field">Tanggal mixing (ground-truth, optional - buat cross-check OCR EXP date)</label>
+    <input type="date" id="referenceDateInput">
+    <div class="field-desc">Kalau diisi, dibandingkan persis (exact match) ke hasil OCR day/month/year - dipakai buat ngetes akurasi OCR, bukan aturan bisnis EXP harus sama dengan tanggal mixing.</div>
+
     <label class="field">1. Get an image</label>
     <button id="btnPickFile">Upload from file</button>
     <input type="file" id="fileInput" accept="image/*" class="hidden">
@@ -144,6 +148,7 @@ const resultTable = document.getElementById('resultTable');
 const resultBody = document.getElementById('resultBody');
 const fieldTypeSelect = document.getElementById('fieldTypeSelect');
 const fieldTypeDesc = document.getElementById('fieldTypeDesc');
+const referenceDateInput = document.getElementById('referenceDateInput');
 const roiNotes = document.getElementById('roiNotes');
 const singleResultTable = document.getElementById('singleResultTable');
 const mismatchNote = document.getElementById('mismatchNote');
@@ -185,6 +190,17 @@ function updateFieldTypeDesc() {
 
 fieldTypeSelect.addEventListener('change', updateFieldTypeDesc);
 loadFieldTypes();
+
+// <input type=date> gives "YYYY-MM-DD" - convert to the DDMMYY string the
+// emboss is actually printed in (day/month/year block widths, see
+// emboss_format_patterns.json), so the backend compares like-for-like
+// strings instead of trying to parse/guess a date format.
+function dateInputToDDMMYY(value) {
+  if (!value) return null;
+  const [y, m, d] = value.split('-');
+  if (!y || !m || !d) return null;
+  return d + m + y.slice(2);
+}
 
 function setStatus(msg, isError) {
   statusEl.textContent = msg || '';
@@ -286,6 +302,10 @@ btnRunOcr.addEventListener('click', async () => {
   formData.append('debug', 'true');
   if (fieldTypeSelect.value) {
     formData.append('field_type', fieldTypeSelect.value);
+  }
+  const refDate = dateInputToDDMMYY(referenceDateInput.value);
+  if (refDate) {
+    formData.append('reference_date', refDate);
   }
 
   try {
@@ -393,6 +413,12 @@ function renderTubeEmbossResult(data) {
   ];
   if (data.error_reason) {
     rows.push(['error_reason', `<b style="color:#b91c1c">${escapeHtml(data.error_reason)}</b>`]);
+  }
+  if (data.date_check && data.date_check.checked) {
+    rows.push(['date_check', badgeHtml(data.date_check.date_match)]);
+    rows.push(['ocr_date vs reference_date', `${escapeHtml(data.date_check.ocr_date)} vs ${escapeHtml(data.date_check.reference_date)}`]);
+  } else if (data.date_check && data.date_check.reason && data.date_check.reason !== 'NO_REFERENCE_DATE') {
+    rows.push(['date_check', `<span class="field-desc">not checked - ${escapeHtml(data.date_check.reason)}</span>`]);
   }
 
   singleResultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');

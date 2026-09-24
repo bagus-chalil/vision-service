@@ -168,10 +168,15 @@ def run_generic_pipeline(image, field_type):
     }
 
 
-def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref):
+def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref, reference_date=None):
     """Tube emboss code sub-pipeline: YOLO11n localization -> crimp-area
     crop -> PaddleOCR -> format validation. See tube_emboss_pipeline.py.
-    Still never decides PASS/FAIL/REVIEW - that stays in Laravel."""
+    Still never decides PASS/FAIL/REVIEW - that stays in Laravel.
+
+    reference_date (optional, DDMMYY string e.g. a QC-entered mixing date)
+    is only used for the date_check cross-check in analyze_tube_emboss() -
+    comparing it against the OCR'd day/month/year is for testing OCR read
+    accuracy, not a business rule that the emboss must equal that date."""
     start = time.time()
     result = tube_emboss_pipeline.analyze_tube_emboss(
         image,
@@ -181,6 +186,7 @@ def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref):
         yolo_model=tube_yolo_model,
         debug=debug,
         image_ref=image_ref,
+        reference_date=reference_date,
     )
     result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     result["pipeline"] = "tube_emboss"
@@ -224,13 +230,19 @@ async def analyze(
     field_type: str = Form(None),
     request_id: str = Form(None),
     debug: bool = Form(False),
+    reference_date: str = Form(None),
 ):
     """Single entrypoint for index.html: looks up field_type's pipeline in
     emboss_format_patterns.json vs field_patterns.json and dispatches to the
     matching pipeline above. This is the seam where future field types
     (WI, exp date, etc.) plug in their own localization pipeline the same
     way tube_emboss did, without the frontend needing to know or hardcode
-    which pipeline each field_type uses."""
+    which pipeline each field_type uses.
+
+    reference_date (optional, DDMMYY string) is a QC-entered ground-truth
+    date - e.g. mixing date - used only by the tube_emboss pipeline's
+    date_check cross-check (see tube_emboss_pipeline.check_reference_date);
+    the generic pipeline ignores it."""
     raw_bytes = await file.read()
     np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
     image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
@@ -246,6 +258,7 @@ async def analyze(
             request_id=request_id or str(uuid.uuid4()),
             debug=debug,
             image_ref=file.filename or "unknown",
+            reference_date=reference_date,
         )
     return run_generic_pipeline(image, field_type)
 
@@ -284,9 +297,12 @@ async def tube_emboss_analyze(
     request_id: str = Form(...),
     field_type: str = Form(None),
     debug: bool = Form(False),
+    reference_date: str = Form(None),
 ):
     """Tube emboss code sub-pipeline, kept as its own endpoint for the
-    standalone tube_emboss.html page and tests/test_tube_emboss.py."""
+    standalone tube_emboss.html page and tests/test_tube_emboss.py.
+
+    reference_date: see analyze()'s docstring above."""
     raw_bytes = await file.read()
     np_buffer = np.frombuffer(raw_bytes, dtype=np.uint8)
     image = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
@@ -300,4 +316,5 @@ async def tube_emboss_analyze(
         request_id=request_id,
         debug=debug,
         image_ref=file.filename or "unknown",
+        reference_date=reference_date,
     )

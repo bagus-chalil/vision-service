@@ -40,7 +40,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `main.py` | FastAPI backend, PaddleOCR di-load sekali saat startup. Import `tube_emboss_pipeline` langsung (plain import, bukan package) — file ini harus tetap sejajar (sibling) dengan `tube_emboss_pipeline.py`. `/api/analyze` adalah entrypoint unified — dispatch ke pipeline generic atau tube_emboss berdasarkan field_type, lihat bagian Endpoint di bawah |
 | `tube_emboss_pipeline.py` | Sub-pipeline khusus emboss tutup tube: YOLO tube localize → crimp crop → OCR dual-pass (raw + sharpened) → `validate_emboss_format()` block-based (day/month/year/batch/mfg_code) |
 | `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`) untuk pipeline GENERIC (whole-image OCR, no localization) — dibaca ulang tiap request, edit langsung tanpa restart. `date_code` sudah DIHAPUS dari sini (Sep 2026) karena digantikan `tube_emboss_default` di `emboss_format_patterns.json` yang localization-nya benar — jangan tambahkan lagi field tube-emboss-related di file ini |
-| `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) untuk pipeline TUBE_EMBOSS (YOLO localize + crop sebelum OCR) — juga dibaca ulang tiap request. Field_type dengan key di file ini otomatis di-route `/api/analyze` ke pipeline ini, TIDAK lewat field_patterns.json |
+| `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) untuk pipeline TUBE_EMBOSS (YOLO localize + crop sebelum OCR) — juga dibaca ulang tiap request. Field_type dengan key di file ini otomatis di-route `/api/analyze` ke pipeline ini, TIDAK lewat field_patterns.json. Ada 2 entry: `tube_emboss_default` (MFD+batch+mfg, 10 char) dan `tube_exp_date` (EXP-only, 6 char DDMMYY, baris emboss terpisah dari MFD — lihat flow reference_date di bawah) |
 | `index.html` | Frontend UNIFIED single-file vanilla JS: 1 dropdown field_type gabungan dari kedua config di atas, upload file/camera capture, tombol Run → `POST /api/analyze` → render otomatis sesuai `data.pipeline` (tabel per-detection untuk generic, atau kv single-result + tube/crimp crop preview untuk tube_emboss) |
 | `tube_emboss.html` | Frontend standalone khusus tube emboss sub-pipeline (dev/debug only, hit `/api/tube-emboss/analyze` langsung) — dipertahankan terpisah dari `index.html`, tidak wajib dipakai user akhir |
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
@@ -55,14 +55,16 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 
 Endpoint `main.py`:
 - `POST /api/analyze` — **entrypoint utama, dipakai `index.html`.** Multipart
-  file + optional `field_type`/`request_id`/`debug` form field. Cek apakah
-  `field_type` ada di `emboss_format_patterns.json` → kalau ya, jalankan
-  `run_tube_emboss_pipeline()` (hasil: `{pipeline: "tube_emboss", ...}`,
-  bentuk sama seperti `/api/tube-emboss/analyze`); kalau tidak, jalankan
-  `run_generic_pipeline()` (hasil: `{pipeline: "generic", ...}`, bentuk sama
-  seperti `/api/ocr`). Field baru (WI/exp date/dll) yang butuh localization
-  sendiri didaftarkan dengan pola yang sama: tambah config file + pipeline
-  function-nya, lalu cek membership di config itu di `analyze()`.
+  file + optional `field_type`/`request_id`/`debug`/`reference_date` form
+  field. Cek apakah `field_type` ada di `emboss_format_patterns.json` → kalau
+  ya, jalankan `run_tube_emboss_pipeline()` (hasil: `{pipeline: "tube_emboss",
+  ...}`, bentuk sama seperti `/api/tube-emboss/analyze`); kalau tidak,
+  jalankan `run_generic_pipeline()` (hasil: `{pipeline: "generic", ...}`,
+  bentuk sama seperti `/api/ocr`). Field baru (WI/dll) yang butuh
+  localization sendiri didaftarkan dengan pola yang sama: tambah config file +
+  pipeline function-nya, lalu cek membership di config itu di `analyze()`.
+  `reference_date` (DDMMYY, opsional) cuma dipakai pipeline tube_emboss —
+  lihat item date_check di bawah.
 - `GET /api/field-types` — **dipakai `index.html`.** Merge
   `field_patterns.json` (tag `pipeline: "generic"`) +
   `emboss_format_patterns.json` (tag `pipeline: "tube_emboss"`) jadi satu
@@ -137,6 +139,18 @@ Endpoint `main.py`:
    aman), bukan bikin false PASS — jadi kalau nemu variasi format lain,
    default-nya perluas config, jangan asumsikan satu schema ini benar buat
    semua tube.
+9. **`tube_exp_date` (EXP-only emboss) beda baris fisik dari
+   `tube_emboss_default` (MFD+batch+mfg)**, walau sama-sama di crimp/shoulder
+   tube — dari sample foto real (2026-09-24), keduanya bisa muncul di foto
+   yang sama tapi baris terpisah. `date_check` (reference_date cross-check di
+   `tube_emboss_pipeline.check_reference_date()`) TIDAK menghitung
+   EXP = tanggal_mixing + shelf-life — cuma exact string match DDMMYY vs
+   DDMMYY, tujuannya ngetes akurasi baca OCR pakai ground-truth yang sudah
+   diketahui (tanggal mixing diinput manual saat testing), BUKAN aturan
+   bisnis nyata bahwa EXP harus sama dengan tanggal mixing. Cross-check ini
+   cuma jalan kalau `format_valid` True dulu (FORMAT_MISMATCH selalu skip
+   date_check, gapeduli reference_date-nya ada) — tetap flag data doang,
+   Vision Service tetap tidak pernah mutuskan match/mismatch jadi PASS/FAIL.
 
 ## Status / progress log
 
@@ -159,6 +173,18 @@ Endpoint `main.py`:
       generic atau tube_emboss berdasarkan field_type, supaya UI tidak perlu
       tahu field mana butuh localization dan mana tidak. `date_code` di
       `field_patterns.json` sudah dihapus (digantikan `tube_emboss_default`)
+- [x] Field `tube_exp_date` (EXP-only emboss, DDMMYY, reuse pipeline
+      tube_emboss) + `reference_date` cross-check (`date_check` di response) —
+      alur: QC input tanggal mixing (ground-truth, dikonversi ke DDMMYY di
+      frontend dari `<input type=date>`) → OCR baca EXP → kalau format_valid,
+      dibandingkan exact-match ke reference_date. Ditambahkan di
+      `index.html` + `tube_emboss.html`. Belum diuji ke foto real "gambar
+      lengkap" (foto tangan-pegang-tube seperti yang di-share user
+      2026-09-24) — YOLO+crimp-crop (`CRIMP_CROP_TOP_FRACTION`) masih
+      di-tuning dari sample foto lama yang framing-nya lebih dekat/rapat;
+      foto baru yang lebih lebar bikin crimp crop ikut kebawa teks body
+      kemasan (lihat item 9 di Key technical gotchas) — localization
+      tuning buat foto lengkap ini next step, belum scope sekarang
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada

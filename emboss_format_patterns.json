@@ -13,5 +13,15 @@
       { "name": "batch_3",     "width": 1, "type": "charset", "pattern": "[A-Za-z0-9]" },
       { "name": "mfg_code",    "width": 1, "type": "charset", "pattern": "[0-9]" }
     ]
+  },
+
+  "tube_exp_date": {
+    "label": "Tube Emboss EXP Date (DDMMYY only)",
+    "description": "Expiration date embossed on the tube shoulder/crimp, separate line from the MFD+batch+mfg code (tube_emboss_default) - format DDMMYY only (day 01-31, month 01-12, year 00-99), no batch or manufacture-code suffix, e.g. EXP 051228 -> day=05 month=12 year=28. Supports the reference_date cross-check flow (main.py/analyze_tube_emboss): a caller-supplied ground-truth date (e.g. QC-entered mixing date, for testing OCR read accuracy) gets compared against this OCR'd day/month/year - exact match only, never fuzzy.",
+    "blocks": [
+      { "name": "day",   "width": 2, "type": "int_range", "min": 1, "max": 31 },
+      { "name": "month", "width": 2, "type": "int_range", "min": 1, "max": 12 },
+      { "name": "year",  "width": 2, "type": "int_range", "min": 0, "max": 99 }
+    ]
   }
 }

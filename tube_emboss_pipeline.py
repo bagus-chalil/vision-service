@@ -336,6 +336,59 @@ def validate_emboss_format(text: str, format_cfg: dict) -> dict:
     }
 
 
+def extract_date_blocks(text: str, format_cfg: dict) -> dict:
+    """Pulls the day/month/year substrings out of OCR text using the
+    field_type's own block widths - works for any tube_emboss field_type
+    that defines day/month/year blocks (tube_emboss_default's MFD code and
+    tube_exp_date's EXP-only code both do), ignoring any other blocks
+    (batch/mfg) that may follow. Returns {} if the block config doesn't
+    define all three - the caller decides what that means."""
+    blocks = format_cfg.get("blocks") or []
+    pos = 0
+    found = {}
+    for block in blocks:
+        width = block["width"]
+        if block["name"] in ("day", "month", "year"):
+            found[block["name"]] = text[pos:pos + width]
+        pos += width
+    if not all(k in found for k in ("day", "month", "year")):
+        return {}
+    return found
+
+
+def check_reference_date(raw_text, format_cfg: dict, format_valid, reference_date) -> dict:
+    """Cross-checks the OCR'd day/month/year against a caller-supplied
+    ground-truth date (e.g. QC-entered mixing date) - for testing whether
+    OCR read the emboss correctly, NOT a business rule that EXP must equal
+    that date. Exact string match only, same never-guess/never-fuzzy
+    principle as validate_emboss_format(). Only runs when the format already
+    passed block validation - a FORMAT_MISMATCH means the day/month/year
+    slice positions aren't trustworthy to begin with, so comparing them
+    would just be noise. Returns a data flag only; PASS/FAIL still never
+    decided here."""
+    if not reference_date:
+        return {"checked": False, "reason": "NO_REFERENCE_DATE", "date_match": None, "reference_date": None, "ocr_date": None}
+
+    if not (len(reference_date) == 6 and reference_date.isdigit()):
+        return {"checked": False, "reason": "REFERENCE_DATE_NOT_DDMMYY", "date_match": None, "reference_date": reference_date, "ocr_date": None}
+
+    if format_valid is not True:
+        return {"checked": False, "reason": "FORMAT_MISMATCH", "date_match": None, "reference_date": reference_date, "ocr_date": None}
+
+    date_blocks = extract_date_blocks(raw_text, format_cfg)
+    if not date_blocks:
+        return {"checked": False, "reason": "NO_DATE_BLOCKS_IN_FIELD_TYPE", "date_match": None, "reference_date": reference_date, "ocr_date": None}
+
+    ocr_date = date_blocks["day"] + date_blocks["month"] + date_blocks["year"]
+    return {
+        "checked": True,
+        "reason": None,
+        "date_match": ocr_date == reference_date,
+        "reference_date": reference_date,
+        "ocr_date": ocr_date,
+    }
+
+
 def log_fallback_case(**fields) -> None:
     """Append a JSONL record for every LOW_CONFIDENCE or FORMAT_MISMATCH
     case - intentional future training data, not just debug noise."""
@@ -354,6 +407,7 @@ def analyze_tube_emboss(
     yolo_model,
     debug: bool = False,
     image_ref: str = "unknown",
+    reference_date: str = None,
 ) -> dict:
     """Runs all 3 stages and returns the result object. Never raises for
     expected failure modes (no tube found, no text found) - those come back
@@ -375,6 +429,7 @@ def analyze_tube_emboss(
             "status": "ERROR",
             "error_reason": localization["reason"],
             "engine_used": None,
+            "date_check": check_reference_date(None, format_cfg, None, reference_date),
         }
         if debug:
             result["debug"] = {
@@ -399,6 +454,7 @@ def analyze_tube_emboss(
             "error_reason": "NO_TEXT_DETECTED",
             "engine_used": None,
             "tube_detection_confidence": localization["confidence"],
+            "date_check": check_reference_date(None, format_cfg, None, reference_date),
         }
         if debug:
             result["debug"] = {
@@ -462,6 +518,7 @@ def analyze_tube_emboss(
         "ocr_agreement": ocr_agreement,
         "validation": validation,
         "tube_detection_confidence": localization["confidence"],
+        "date_check": check_reference_date(raw_text, format_cfg, format_valid, reference_date),
     }
 
     if debug:
