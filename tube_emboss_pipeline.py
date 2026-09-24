@@ -98,8 +98,12 @@ LABEL_ANCHOR_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{6}})"
 # full rather than the tube-emboss convention of 2 digits. The year is
 # restricted to 20xx: if the OCR'd year doesn't start with "20" this pattern
 # simply doesn't match at all (never forced/guessed) rather than assuming a
-# century. Separator between day/month/year may be ".", "-", or "/".
-LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{2}})[.\-/](\d{{2}})[.\-/](20\d{{2}})"
+# century. Separator between day/month/year may be ".", "-", "/", or ":" -
+# ":" is in there because a zoomed re-OCR pass (find_zoom_retry_match) of a
+# real sample misread one of the two dots as a colon ("EXP: 27.01:2029") -
+# recognized character, not guessed, so accepting it as a separator doesn't
+# touch the never-strip/never-correct-digits rule.
+LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE = r"{label}\.?\s*:?\s*(\d{{2}})[.\-/:](\d{{2}})[.\-/:](20\d{{2}})"
 
 
 def load_yolo_model(model_path: Path = TUBE_DETECTOR_PATH) -> YOLO:
@@ -200,15 +204,24 @@ def preprocess_crimp_for_ocr(crimp_crop_bgr):
     return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
 
 
-def ocr_text_pieces(image_bgr, ocr_engine) -> list:
+def ocr_text_pieces(image_bgr, ocr_engine, **predict_kwargs) -> list:
     """Runs PaddleOCR once and returns each detected text region as its own
-    piece {"text", "confidence"}, in reading order (top-to-bottom,
+    piece {"text", "confidence", "poly"}, in reading order (top-to-bottom,
     left-to-right by box centroid) - no joining/concatenation. Shared by
     recognize_crimp_text() (which joins pieces back into one code) and the
     label-anchor search (which must evaluate each detected region on its own,
     see find_label_anchor_match()) so a piece of unrelated printed text next
-    to the code can never get glued onto it."""
-    results = ocr_engine.predict(input=image_bgr)
+    to the code can never get glued onto it. "poly" (the region's own 4-point
+    quad in the image passed in) is carried along so find_zoom_retry_match()
+    can crop back to a specific piece's location without re-detecting it.
+
+    **predict_kwargs are forwarded straight to PaddleOCR.predict() - e.g.
+    find_zoom_retry_match() passes a lower text_det_box_thresh there to keep
+    faint/dense text boxes the default threshold would otherwise discard.
+    These are real per-call overrides in this installed paddleocr version
+    (verified 2026-09-24 against PaddleOCR.predict()'s signature) - no need
+    for a second PaddleOCR instance to use different detection parameters."""
+    results = ocr_engine.predict(input=image_bgr, **predict_kwargs)
 
     texts, scores, polys = [], [], []
     for res in results:
@@ -224,7 +237,7 @@ def ocr_text_pieces(image_bgr, ocr_engine) -> list:
         return (float(arr[:, 1].mean()), float(arr[:, 0].mean()))
 
     order = sorted(range(len(texts)), key=lambda i: centroid(polys[i]))
-    return [{"text": texts[i], "confidence": float(scores[i])} for i in order]
+    return [{"text": texts[i], "confidence": float(scores[i]), "poly": polys[i]} for i in order]
 
 
 def recognize_crimp_text(crimp_crop, ocr_engine) -> dict:
@@ -362,6 +375,172 @@ def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
     }
 
 
+# How far above/below a label-containing piece's own detected box to crop
+# before zooming in (find_zoom_retry_match) - as a multiple of that piece's
+# own height. Generous on purpose: the whole reason the label's own box has
+# no digits attached is that the detector already mis-boxed this dense text,
+# so a tight crop right at the piece's edges could just as easily clip the
+# date again. A wider band re-exposes the full physical text line to a fresh
+# detection pass instead of trusting the original (already wrong) box shape.
+ZOOM_RETRY_VERTICAL_PADDING_FACTOR = 1.5
+
+# Upscale the cropped band until it's roughly this many px tall. Sample
+# measurement 2026-09-24: a real label's MFG/EXP/LOT block was ~120px tall in
+# an 845px-tall tube crop - too small for the detector to keep the date
+# digits as a real motivating case (see gotcha #11 in CLAUDE.md); upscaling
+# just that band clean enough to read.
+ZOOM_RETRY_UPSCALE_TARGET_HEIGHT = 200
+
+# Lower than the text detection model's own default (~0.45, see its
+# inference.yml) - keeps faint/dense text boxes the default threshold drops
+# entirely. Confirmed empirically 2026-09-24: this only mattered once
+# combined with the crop+upscale above - at full-image resolution alone it
+# did nothing (the digits were already gone, not just below-threshold).
+ZOOM_RETRY_BOX_THRESH = 0.3
+
+
+def _piece_y_range(poly):
+    arr = np.array(poly)
+    return float(arr[:, 1].min()), float(arr[:, 1].max())
+
+
+def _piece_y_center(poly):
+    return float(np.array(poly)[:, 1].mean())
+
+
+def _piece_x_center(poly):
+    return float(np.array(poly)[:, 0].mean())
+
+
+def group_zoomed_pieces_into_lines(pieces: list) -> list:
+    """Clusters OCR pieces that sit on the same visual line into one
+    synthesized piece each, text concatenated in left-to-right (x-position)
+    order within the line. Used ONLY by find_zoom_retry_match() on its own
+    tiny re-OCR'd band - safe there specifically because that crop is
+    already scoped to ~1-3 physical lines' worth of image (see
+    ZOOM_RETRY_VERTICAL_PADDING_FACTOR), unlike the whole-frame/tube-crop
+    pieces find_label_anchor_match() and find_digit_fallback_match() work on
+    directly, which deliberately never concatenate across detections (see
+    ocr_text_pieces() docstring) to avoid gluing unrelated printed text
+    together.
+
+    Added 2026-09-24 after the zoomed re-OCR of a real dense-label sample
+    correctly read the EXP line's digits ('27.01.2029', 99.5% confidence)
+    but as a SEPARATE detection from its own 'EXP:' label piece -
+    find_label_anchor_match() only ever looks inside a single piece's text,
+    so without grouping these two together they'd never be recognized as
+    belonging to the same line.
+
+    Groups by Y-CENTER proximity against each cluster's fixed seed piece
+    (never by expanding the cluster's own y-range as more pieces join it) -
+    on a first attempt using range-overlap, adjacent-but-DIFFERENT physical
+    lines chain-merged into one giant group on this exact sample, because
+    the label's lines are packed close enough that consecutive lines'
+    bounding boxes already overlap (that tight spacing is the whole reason
+    this zoom path exists - see gotcha #11/#12 in CLAUDE.md). Real measured
+    centers on that sample: "EXP:" (y-center 105.5) sits 1.5px from
+    "27.01.2029" (104) but 30-34px from "MFB"/"LOT: AAB" on the neighboring
+    lines - comparing every candidate against the fixed seed's center (not a
+    range that grows every time a piece joins) is what keeps that gap
+    separating the lines correctly instead of cascading through all of
+    them."""
+    remaining = [p for p in pieces if p.get("poly") is not None]
+    lines = []
+    while remaining:
+        seed = remaining.pop(0)
+        seed_y1, seed_y2 = _piece_y_range(seed["poly"])
+        seed_height = max(1.0, seed_y2 - seed_y1)
+        seed_center = _piece_y_center(seed["poly"])
+        group = [seed]
+        still_remaining = []
+        for p in remaining:
+            p_y1, p_y2 = _piece_y_range(p["poly"])
+            p_height = max(1.0, p_y2 - p_y1)
+            p_center = _piece_y_center(p["poly"])
+            threshold = 0.5 * min(seed_height, p_height)
+            if abs(p_center - seed_center) <= threshold:
+                group.append(p)
+            else:
+                still_remaining.append(p)
+        remaining = still_remaining
+        group.sort(key=lambda p: _piece_x_center(p["poly"]))
+        lines.append({
+            "text": "".join(p["text"] for p in group),
+            "confidence": min(p["confidence"] for p in group),
+            "poly": None,
+        })
+    return lines
+
+
+def find_zoom_retry_match(image_bgr, ocr_engine, pieces: list, label: str) -> dict:
+    """Last-resort fallback for label_anchor fields, tried only after both
+    find_label_anchor_match() and find_digit_fallback_match() have already
+    failed on the full search image (see recognize_label_anchor_dual). Real
+    sample (2026-09-24): a printed label with MFG/EXP/LOT lines packed close
+    together lost its EXP line's digits entirely at whole-image OCR
+    resolution - the label text itself ("EXP:") was still detected as its
+    own piece, just with no digits attached to it (dropped or fused into the
+    MFG line above), so neither the label-anchor nor the digit-fallback path
+    had anything usable to find.
+
+    Finds any already-detected `pieces` entry that contains the literal
+    label (this only works when the label survived at whole-image
+    resolution, even without its digits - if "EXP" isn't in any piece at
+    all, this returns unmatched immediately, same as the other paths), crops
+    a generously padded horizontal band around that piece's own location
+    from the ORIGINAL image (see ZOOM_RETRY_VERTICAL_PADDING_FACTOR),
+    upscales it, and re-runs OCR on just that band with a lower
+    text_det_box_thresh - then retries the ordinary label search on that
+    fresh, higher-resolution read. This never re-crops based on a fixed
+    pixel position (the crop is always anchored to wherever THIS image's
+    OCR actually found the label) and never edits/guesses at digits - it
+    only gives the detector a second, better-resolved look at the same
+    physical text line. Multiple label-containing pieces yielding different
+    codes -> ambiguous, same never-guess rule as every other path here."""
+    label_pattern = re.compile(re.escape(label), re.IGNORECASE)
+    label_pieces = [p for p in pieces if p.get("poly") is not None and label_pattern.search(p["text"])]
+    if not label_pieces:
+        return {"matched": False}
+
+    img_h, img_w = image_bgr.shape[:2]
+    hits = []
+    for piece in label_pieces:
+        poly = np.array(piece["poly"])
+        y1, y2 = float(poly[:, 1].min()), float(poly[:, 1].max())
+        box_height = max(1.0, y2 - y1)
+        pad = box_height * ZOOM_RETRY_VERTICAL_PADDING_FACTOR
+        crop_y1 = max(0, int(y1 - pad))
+        crop_y2 = min(img_h, int(y2 + pad))
+        band = image_bgr[crop_y1:crop_y2, 0:img_w]
+        if band.shape[0] < 2 or band.shape[1] < 2:
+            continue
+
+        scale = max(1.0, ZOOM_RETRY_UPSCALE_TARGET_HEIGHT / band.shape[0])
+        zoomed = cv2.resize(band, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        zoom_pieces = ocr_text_pieces(zoomed, ocr_engine, text_det_box_thresh=ZOOM_RETRY_BOX_THRESH)
+        zoom_lines = group_zoomed_pieces_into_lines(zoom_pieces)
+        zoom_match = find_label_anchor_match(zoom_lines, label)
+        if zoom_match.get("matched"):
+            hits.append(zoom_match)
+
+    if not hits:
+        return {"matched": False}
+
+    distinct_codes = {h["extracted_digits"] for h in hits}
+    if len(distinct_codes) > 1:
+        return {"matched": False, "ambiguous": True, "candidates": hits}
+
+    best = max(hits, key=lambda h: h["confidence"])
+    return {
+        "matched": True,
+        "matched_text": best["matched_text"],
+        "extracted_digits": best["extracted_digits"],
+        "confidence": round(best["confidence"], 4),
+        "date_format": best["date_format"],
+    }
+
+
 def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: dict) -> dict:
     """Label-anchor equivalent of recognize_crimp_text_dual(): runs the
     anchor search on the raw image, and - unless that raw pass already
@@ -410,6 +589,21 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
                 "date_format": None,
                 "all_detected_text": all_detected_text,
             }
+
+        zoom_match = find_zoom_retry_match(image_bgr, ocr_engine, raw_pieces, label)
+        if zoom_match.get("matched"):
+            capped_confidence = min(zoom_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
+            return {
+                "detected": True,
+                "text": zoom_match["matched_text"],
+                "extracted_digits": zoom_match["extracted_digits"],
+                "confidence": round(capped_confidence, 4),
+                "agreement": None,
+                "match_method": "zoom_retry",
+                "date_format": zoom_match["date_format"],
+                "all_detected_text": all_detected_text,
+            }
+
         return {
             "detected": False,
             "all_detected_text": all_detected_text,
@@ -417,6 +611,8 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
             "candidates": raw_match.get("candidates") or sharp_match.get("candidates") or [],
             "digit_fallback_ambiguous": fallback_match.get("ambiguous", False),
             "digit_fallback_candidates": fallback_match.get("candidates", []),
+            "zoom_retry_ambiguous": zoom_match.get("ambiguous", False),
+            "zoom_retry_candidates": zoom_match.get("candidates", []),
         }
 
     agreement = (
@@ -715,7 +911,10 @@ def analyze_label_anchor_field(
     ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor, format_cfg)
 
     if not ocr_result["detected"]:
-        if ocr_result.get("digit_fallback_ambiguous"):
+        if ocr_result.get("zoom_retry_ambiguous"):
+            reason = "ZOOM_RETRY_AMBIGUOUS"
+            reason_detail = "no literal label match at full resolution, and a zoomed re-read of the label's own location found multiple different dates - see candidates"
+        elif ocr_result.get("digit_fallback_ambiguous"):
             reason = "DIGIT_FALLBACK_AMBIGUOUS"
             reason_detail = "no literal label match, and multiple isolated 6-digit candidates pass format validation - see candidates"
         elif ocr_result.get("ambiguous"):
@@ -723,7 +922,7 @@ def analyze_label_anchor_field(
             reason_detail = f"multiple '{label_anchor}' matches with different dates - see candidates"
         else:
             reason = "LABEL_NOT_FOUND"
-            reason_detail = f"label '{label_anchor}' not found in OCR text, and no valid 6-digit fallback candidate either"
+            reason_detail = f"label '{label_anchor}' not found in OCR text (including a zoomed re-read of any partial label match), and no valid 6-digit fallback candidate either"
         raw_text = ocr_result.get("all_detected_text") or None
         validation = {
             "format_valid": False,
@@ -733,7 +932,11 @@ def analyze_label_anchor_field(
             "block_mismatches": [],
             "reason": reason_detail,
         }
-        all_candidates = ocr_result.get("candidates", []) + ocr_result.get("digit_fallback_candidates", [])
+        all_candidates = (
+            ocr_result.get("candidates", [])
+            + ocr_result.get("digit_fallback_candidates", [])
+            + ocr_result.get("zoom_retry_candidates", [])
+        )
         log_fallback_case(
             request_id=request_id,
             field_type=resolved_field_type,
