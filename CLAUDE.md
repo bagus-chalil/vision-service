@@ -177,6 +177,50 @@ Endpoint `main.py`:
     di-override per-call di `predict()`), yang bentrok sama constraint
     "jangan construct PaddleOCR dua kali" di `main.py` — belum digarap,
     next step kalau kasus ini kejadian di produksi.
+11. **`label_anchor` (item 10) diperluas 3x lagi (2026-09-24) setelah tes ke
+    sample foto real** — semua di `tube_emboss_pipeline.py`:
+    - **Digit fallback tanpa label "EXP" sama sekali** (`find_digit_fallback_match()`):
+      sample tutup tube nyata ("AJA120927 PU") ternyata gak ada kata "EXP"-nya
+      di embossnya sama sekali, cuma digit polos — beda layout fisik dari 3
+      sample yang jadi basis `label_anchor` di awal. Kalau literal-label
+      search gagal total di kedua pass (raw + sharpened), sekarang dicoba
+      cari run 6-digit yang TERISOLASI (`(?<!\d)(\d{6})(?!\d)` — gak bakal
+      kepotong dari tengah kode 10-digit `tube_emboss_default`) dan yang lolos
+      validasi day/month/year field_type itu sendiri. Kalau ketemu, confidence
+      SELALU di-cap di bawah `GEMINI_FALLBACK_THRESHOLD` (gak pernah jadi OK
+      diam-diam, karena gak ada anchor tekstual sama sekali — cuma
+      LOW_CONFIDENCE dengan `match_method: "digit_fallback"` di response buat
+      transparansi ke consumer). Kalau ada >1 kandidat digit valid yang beda
+      → tetap `DIGIT_FALLBACK_AMBIGUOUS`, gak pernah nebak salah satu.
+    - **Format tanggal titik + tahun 4-digit** (`LABEL_ANCHOR_DOTTED_PATTERN_TEMPLATE`):
+      sample label cetak (botol "if you inbalance") pakai `"EXP: 27.01.2029"`
+      (DD.MM.YYYY, bukan DDMMYY 6-digit nempel). `find_label_anchor_match()`
+      sekarang coba pattern compact dulu, baru dotted kalau gak match — tahun
+      dibatasi harus mulai `20` (gak nebak abad kalau OCR baca beda), lalu
+      cuma buang prefix "20" itu buat masuk ke block schema 2-digit-year yang
+      sudah ada (day+month+2-digit-year tetap dari digit yang sama persis
+      yang diketik OCR, gak pernah diedit/ditebak). **Known gap**: kalau baris
+      MFG+EXP-nya berdempetan (persis sample Pond's di item 10), teks yang
+      sampai ke regex ini SUDAH kegabung/ngaco dari tahap detection PaddleOCR
+      — dotted-format pattern gak bisa nolong kalau digit-nya sendiri sudah
+      salah baca sebelum regex jalan. Confirmed masih gagal di sample itu
+      walau regex-nya sendiri sudah diverifikasi benar via unit test terpisah.
+    - **`LABEL_ANCHOR_MIN_TUBE_CONFIDENCE` (0.5, lebih tinggi dari
+      `YOLO_MIN_CONFIDENCE` 0.25 punya jalur default)**: sample tutup botol
+      kuning ("EXP.150728 TU") dapat deteksi "tube" YOLO 41.6% confidence
+      yang salah total — nge-crop ke objek blur di background, bukan ke tutup
+      botolnya, jadi OCR gak baca apa-apa (`raw_ocr_text: null`). Di jalur
+      `label_anchor` khusus, false-accept (pakai bbox lemah yang salah) jauh
+      lebih mahal dari false-reject (fallback ke whole-frame, yang memang
+      sudah didesain robust — lihat item 10), makanya ambang kepercayaan
+      buat TRUST crop-nya dinaikkan ke 0.5 khusus di jalur ini
+      (`analyze_label_anchor_field()` manggil `localize_tube(..., min_confidence=LABEL_ANCHOR_MIN_TUBE_CONFIDENCE)`),
+      jalur default `tube_emboss_default` tetap pakai `YOLO_MIN_CONFIDENCE`
+      lama karena di situ bbox yang salah fatal juga baik diterima maupun
+      ditolak. Confirmed fix di sample yang sama (sekarang ketemu
+      `"EXP.150728 TU"` via whole-frame fallback). Regression-tested ke 32
+      foto sample di `images/` — nggak ada sample lain yang jadi rusak gara2
+      threshold ini naik.
 
 ## Status / progress log
 
@@ -214,6 +258,13 @@ Endpoint `main.py`:
       ketelen jadi satu region oleh PaddleOCR text detector sebelum
       `label_anchor` sempat misahin - butuh instance PaddleOCR kedua dengan
       `text_det_unclip_ratio` lebih kecil, belum digarap (lihat item 10)
+- [x] `label_anchor` diperluas 3x lagi (2026-09-24) dari tes ke lebih banyak
+      sample foto real (lihat item 11): digit-fallback buat tutup tube tanpa
+      kata "EXP" sama sekali, dukungan format tanggal titik + tahun 4-digit
+      buat label cetak, dan ambang kepercayaan deteksi tube yang lebih ketat
+      khusus jalur ini biar gak salah crop ke background. Regression-tested
+      ke 32 foto di `images/`, nggak ada yang rusak. Known gap Pond's (item
+      10) masih belum tertangani - butuh PaddleOCR instance kedua
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada
