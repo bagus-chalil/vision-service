@@ -431,44 +431,55 @@ def group_zoomed_pieces_into_lines(pieces: list) -> list:
     so without grouping these two together they'd never be recognized as
     belonging to the same line.
 
-    Groups by Y-CENTER proximity against each cluster's fixed seed piece
-    (never by expanding the cluster's own y-range as more pieces join it) -
-    on a first attempt using range-overlap, adjacent-but-DIFFERENT physical
-    lines chain-merged into one giant group on this exact sample, because
-    the label's lines are packed close enough that consecutive lines'
-    bounding boxes already overlap (that tight spacing is the whole reason
-    this zoom path exists - see gotcha #11/#12 in CLAUDE.md). Real measured
-    centers on that sample: "EXP:" (y-center 105.5) sits 1.5px from
-    "27.01.2029" (104) but 30-34px from "MFB"/"LOT: AAB" on the neighboring
-    lines - comparing every candidate against the fixed seed's center (not a
-    range that grows every time a piece joins) is what keeps that gap
-    separating the lines correctly instead of cascading through all of
-    them."""
-    remaining = [p for p in pieces if p.get("poly") is not None]
-    lines = []
-    while remaining:
-        seed = remaining.pop(0)
-        seed_y1, seed_y2 = _piece_y_range(seed["poly"])
-        seed_height = max(1.0, seed_y2 - seed_y1)
-        seed_center = _piece_y_center(seed["poly"])
-        group = [seed]
-        still_remaining = []
-        for p in remaining:
-            p_y1, p_y2 = _piece_y_range(p["poly"])
-            p_height = max(1.0, p_y2 - p_y1)
-            p_center = _piece_y_center(p["poly"])
-            threshold = 0.5 * min(seed_height, p_height)
-            if abs(p_center - seed_center) <= threshold:
-                group.append(p)
-            else:
-                still_remaining.append(p)
-        remaining = still_remaining
+    Groups by Y-CENTER proximity between each piece and the one immediately
+    before it in y-sorted order (sequential/single-linkage), never against a
+    cluster's own fixed seed piece and never by expanding the cluster's own
+    y-range as more pieces join it. Went through two earlier designs that
+    each failed on a real sample: (1) range-overlap chain-merged adjacent-
+    but-DIFFERENT physical lines into one giant group, because the label's
+    lines are packed close enough that consecutive lines' bounding boxes
+    already overlap (that tight spacing is the whole reason this zoom path
+    exists - see gotcha #11/#12 in CLAUDE.md); (2) comparing every candidate
+    against a fixed seed (the first piece popped off the list, i.e. topmost)
+    fixed that chain-merge but introduced a new bug on a real Pond's/
+    Elsheskin sample (2026-09-24) where the digits belonged to the EXP line
+    but sat almost equidistant between the MFD line's seed and EXP's own
+    piece - "27.01.2029" (y-center 98) was only 3px from "EXP:" (101) but
+    still landed just inside the MFD seed's threshold (gap 29.5 vs a 30px
+    limit) because the MFD piece got popped as seed first and claimed it
+    before EXP ever got a turn to be compared against. Sequential adjacent-
+    gap grouping sidesteps both failure modes: a piece is only ever compared
+    to its immediate neighbor in sorted order, so it can never be glued to a
+    distant seed just because of pop order, and a run can only grow one
+    small gap at a time rather than via an ever-expanding shared range."""
+    ordered = sorted(
+        (p for p in pieces if p.get("poly") is not None),
+        key=lambda p: _piece_y_center(p["poly"]),
+    )
+
+    def _finalize(group):
         group.sort(key=lambda p: _piece_x_center(p["poly"]))
-        lines.append({
+        return {
             "text": "".join(p["text"] for p in group),
             "confidence": min(p["confidence"] for p in group),
             "poly": None,
-        })
+        }
+
+    lines = []
+    current_group = []
+    prev_center = None
+    prev_height = None
+    for p in ordered:
+        y1, y2 = _piece_y_range(p["poly"])
+        height = max(1.0, y2 - y1)
+        center = _piece_y_center(p["poly"])
+        if current_group and abs(center - prev_center) > 0.5 * min(prev_height, height):
+            lines.append(_finalize(current_group))
+            current_group = []
+        current_group.append(p)
+        prev_center, prev_height = center, height
+    if current_group:
+        lines.append(_finalize(current_group))
     return lines
 
 

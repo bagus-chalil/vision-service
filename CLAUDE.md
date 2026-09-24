@@ -167,16 +167,9 @@ Endpoint `main.py`:
     (`"FJZ EXP.130927"`) atau suffix code sesudah 6 digit (`"EXP.150728 TU"`)
     gak ikut ngerusak match, tanpa pernah strip/edit 6 digit yang match.
     Confirmed fix di sample Elsheskin tube asli (raw text jadi bersih
-    `"EXP 210428"`, confidence 99.8%). **Known gap**: kalau baris EXP dan MFD
-    di-emboss BERDEKATAN banget (sample Pond's UV Protect, 2026-09-24),
-    PaddleOCR text-DETECTION-nya sendiri (bukan recognition) kadang
-    menggabungkan 2 baris itu jadi SATU region sebelum OCR sempat
-    baca — `label_anchor` search gak bisa misahin lagi kalau sudah kegabung di
-    level ini. Perbaikan butuh instance PaddleOCR kedua dengan
-    `text_det_unclip_ratio` lebih kecil (constructor-only param, tidak bisa
-    di-override per-call di `predict()`), yang bentrok sama constraint
-    "jangan construct PaddleOCR dua kali" di `main.py` — belum digarap,
-    next step kalau kasus ini kejadian di produksi.
+    `"EXP 210428"`, confidence 99.8%). Known gap kalau baris EXP dan MFD
+    di-emboss BERDEKATAN banget (sample Pond's UV Protect, 2026-09-24) sudah
+    RESOLVED via `find_zoom_retry_match()` — lihat item 12.
 11. **`label_anchor` (item 10) diperluas 3x lagi (2026-09-24) setelah tes ke
     sample foto real** — semua di `tube_emboss_pipeline.py`:
     - **Digit fallback tanpa label "EXP" sama sekali** (`find_digit_fallback_match()`):
@@ -199,12 +192,11 @@ Endpoint `main.py`:
       dibatasi harus mulai `20` (gak nebak abad kalau OCR baca beda), lalu
       cuma buang prefix "20" itu buat masuk ke block schema 2-digit-year yang
       sudah ada (day+month+2-digit-year tetap dari digit yang sama persis
-      yang diketik OCR, gak pernah diedit/ditebak). **Known gap**: kalau baris
-      MFG+EXP-nya berdempetan (persis sample Pond's di item 10), teks yang
-      sampai ke regex ini SUDAH kegabung/ngaco dari tahap detection PaddleOCR
-      — dotted-format pattern gak bisa nolong kalau digit-nya sendiri sudah
-      salah baca sebelum regex jalan. Confirmed masih gagal di sample itu
-      walau regex-nya sendiri sudah diverifikasi benar via unit test terpisah.
+      yang diketik OCR, gak pernah diedit/ditebak). Ini pattern yang akhirnya
+      match sample Pond's setelah fix di item 12 (`date_format:
+      "dotted_4digit_year"`, lewat `find_zoom_retry_match()` bukan langsung
+      dari raw/sharpened pass — lihat item 12 untuk kenapa raw/sharpened saja
+      gak cukup).
     - **`LABEL_ANCHOR_MIN_TUBE_CONFIDENCE` (0.5, lebih tinggi dari
       `YOLO_MIN_CONFIDENCE` 0.25 punya jalur default)**: sample tutup botol
       kuning ("EXP.150728 TU") dapat deteksi "tube" YOLO 41.6% confidence
@@ -221,6 +213,68 @@ Endpoint `main.py`:
       `"EXP.150728 TU"` via whole-frame fallback). Regression-tested ke 32
       foto sample di `images/` — nggak ada sample lain yang jadi rusak gara2
       threshold ini naik.
+12. **`find_zoom_retry_match()` (2026-09-24) — last-resort fallback buat
+    `label_anchor` fields, dicoba setelah `find_label_anchor_match()` DAN
+    `find_digit_fallback_match()` sama-sama gagal di raw+sharpened pass.**
+    Motivasi: sample Pond's/Elsheskin (item 10/11's "Known gap") di
+    whole-tube-crop resolution ternyata gak benar-benar "kegabung jadi satu
+    region" seperti dugaan awal — piece "EXP:" tetap kedetect sendiri, cuma
+    TANPA digit nempel (digitnya kepotong/fused ke piece tanggal MFD di
+    sekitarnya, karena baris MFD/EXP/LOT di-emboss rapat banget). Fix-nya:
+    begitu ketemu piece yang mengandung label literal (misal "EXP:") tapi
+    tanpa 6-digit match, crop ulang band vertikal generous di sekitar posisi
+    piece itu dari gambar ASLI (`ZOOM_RETRY_VERTICAL_PADDING_FACTOR` = 1.5x
+    tinggi piece-nya), upscale ke `ZOOM_RETRY_UPSCALE_TARGET_HEIGHT` (200px),
+    lalu re-OCR band itu sendirian dengan `text_det_box_thresh` lebih rendah
+    (`ZOOM_RETRY_BOX_THRESH` = 0.3, vs default ~0.45) supaya box teks
+    padat/kecil gak didrop duluan oleh detector. Re-OCR band kecil ini
+    (bukan whole-image) yang bikin digit dan labelnya kebaca sebagai
+    detection terpisah dengan resolusi cukup — tanpa PaddleOCR instance
+    kedua dan tanpa pernah edit/tebak digit yang terbaca, cuma kasih
+    detector "kesempatan kedua" di resolusi lebih tinggi.
+
+    Karena band hasil re-OCR ini masih berisi >1 baris fisik (MFD/EXP/LOT),
+    hasil `ocr_text_pieces()`-nya perlu di-cluster per baris dulu
+    (`group_zoomed_pieces_into_lines()`) sebelum dilempar ke
+    `find_label_anchor_match()` yang biasa — beda dari cara kerja normal
+    `find_label_anchor_match()`/`find_digit_fallback_match()` yang sengaja
+    TIDAK pernah menggabung antar-detection (lihat `ocr_text_pieces()`
+    docstring), karena di jalur zoom_retry band-nya sudah pasti cuma
+    1-3 baris jadi risiko nggabung teks yang gak berhubungan jauh lebih
+    kecil. Clustering ini sendiri melewati 2 desain gagal sebelum settled:
+    (1) range-overlap (gabungin cluster kalau bounding-box-nya overlap) —
+    chain-merge SEMUA baris jadi satu group raksasa, karena baris-baris yang
+    rapat itu bounding box-nya emang udah overlap satu sama lain; (2)
+    fixed-seed (bandingkan tiap piece ke piece PERTAMA yang jadi representasi
+    cluster) — betulin chain-merge, tapi bikin bug baru persis di sample
+    Pond's: piece digit "27.01.2029" (y-center 98) cuma 3px dari piece
+    "EXP:" (101), TAPI piece MFD ("20.01.2026", y-center 68.5) kepop duluan
+    jadi seed karena posisinya paling atas, dan jarak "27.01.2029" ke seed
+    MFD itu (29.5px) kebetulan masih di bawah threshold (30px) — jadi
+    ke-klaim MFD duluan sebelum "EXP:" sempat jadi seed sendiri. Fix final
+    (`group_zoomed_pieces_into_lines()` sekarang): urutkan semua piece by
+    y-center, lalu grouping SEQUENTIAL — tiap piece cuma dibandingkan ke
+    piece SEBELUMNYA di urutan itu (bukan ke seed tetap, bukan ke range
+    cluster yang membesar), mulai group baru begitu gap-nya lewat threshold
+    (`0.5 * min(tinggi kedua piece)`). Ini imun ke kedua bug sebelumnya:
+    gak ada range yang membesar (jadi gak chain-merge), dan gak ada
+    urutan-pop yang nentuin siapa "menang" klaim suatu piece (jadi
+    "27.01.2029" kebanding ke tetangga langsungnya di urutan, bukan ke seed
+    yang kebetulan lebih dulu diproses).
+
+    **Confirmed fix** di sample asli (`WhatsApp Image 2026-09-24 at
+    11.31.20.jpeg`, Pond's/Elsheskin): sebelumnya `LABEL_NOT_FOUND` total,
+    sekarang `EXP:27.01.2029` → extracted `270129`, `match_method:
+    "zoom_retry"`, `date_format: "dotted_4digit_year"`, `FORMAT_OK`,
+    confidence di-cap 0.84 (`LOW_CONFIDENCE`, sesuai desain — zoom_retry
+    match TIDAK PERNAH jadi confident `OK` diam-diam, sama seperti
+    `digit_fallback`, karena ini re-baca band yang tadinya gagal, bukan
+    baca langsung yang bersih). Regression-tested ke semua 32 foto di
+    `images/` (field_type `tube_exp_date`): 31 foto lainnya hasilnya
+    IDENTIK sebelum/sesudah fix ini (status/extracted/confidence/
+    match_method sama persis) — cuma sample Pond's yang berubah, dari
+    `LABEL_NOT_FOUND` jadi resolved. Known gap item 10/11 soal sample
+    Pond's ini sekarang RESOLVED.
 
 ## Status / progress log
 
@@ -253,18 +307,24 @@ Endpoint `main.py`:
       crimp-crop fixed-percentage ternyata framing-dependent (lihat item 9 &
       10 di Key technical gotchas), diganti pendekatan `label_anchor`
       (cari literal "EXP" + 6 digit per-region OCR result, bukan posisi crop
-      tetap). Confirmed fix di sample tube asli user. Known gap: baris
-      EXP+MFD yang di-emboss berdekatan (sample Pond's) masih bisa
-      ketelen jadi satu region oleh PaddleOCR text detector sebelum
-      `label_anchor` sempat misahin - butuh instance PaddleOCR kedua dengan
-      `text_det_unclip_ratio` lebih kecil, belum digarap (lihat item 10)
+      tetap). Confirmed fix di sample tube asli user.
 - [x] `label_anchor` diperluas 3x lagi (2026-09-24) dari tes ke lebih banyak
       sample foto real (lihat item 11): digit-fallback buat tutup tube tanpa
       kata "EXP" sama sekali, dukungan format tanggal titik + tahun 4-digit
       buat label cetak, dan ambang kepercayaan deteksi tube yang lebih ketat
       khusus jalur ini biar gak salah crop ke background. Regression-tested
-      ke 32 foto di `images/`, nggak ada yang rusak. Known gap Pond's (item
-      10) masih belum tertangani - butuh PaddleOCR instance kedua
+      ke 32 foto di `images/`, nggak ada yang rusak.
+- [x] Known gap Pond's/Elsheskin (baris EXP+MFD berdempetan) RESOLVED
+      (2026-09-24, lihat item 12): tambah `find_zoom_retry_match()` sebagai
+      last-resort fallback (crop+upscale+re-OCR band kecil di sekitar piece
+      label yang ketemu tapi tanpa digit) plus `group_zoomed_pieces_into_lines()`
+      buat cluster hasil re-OCR itu per baris fisik. Clustering-nya sempat 2x
+      salah desain (range-overlap chain-merge, lalu fixed-seed yang salah
+      klaim piece digit ke baris MFD padahal harusnya baris EXP) sebelum
+      settled ke sequential adjacent-gap grouping. Confirmed fix di sample
+      asli, regression-tested ke 32 foto - 31 lainnya hasilnya identik,
+      cuma Pond's yang berubah dari `LABEL_NOT_FOUND` jadi resolved
+      (`FORMAT_OK`, `LOW_CONFIDENCE`, capped confidence 0.84 by design).
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada
