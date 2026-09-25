@@ -325,6 +325,25 @@ def find_label_anchor_match(pieces: list, label: str) -> dict:
     }
 
 
+# Labels of OTHER, distinctly different emboss/print date fields that
+# digit_fallback must never mistake for the field it's actually searching
+# for. Added 2026-09-24 after a real Pond's tube sample: "MFD 140624 8 QFZ"
+# (manufacture date, printed on the tube body) was the only isolated
+# 6-digit run digit_fallback could find at all - the real EXP code
+# ("EXP 140627", embossed on the crimp) had its "140" fused/dropped by OCR
+# in every pass tried (raw, sharpened, AND the zoomed re-OCR retry - see
+# find_zoom_retry_match), leaving only a stray "627" (3 digits, too short to
+# match). Since digit_fallback has no literal-label anchor of its own
+# (that's the whole point of it - see the docstring below), nothing else
+# stopped it from confidently returning MFD's date as if it were EXP's.
+# "MFD" is a standard packaging abbreviation (manufacture date), not
+# SKU-specific data, and the same tier of literal signal find_label_anchor_
+# match() already keys on for "EXP" - so rejecting a piece that spells out
+# a DIFFERENT date field's own label isn't a guess, it's reading text that
+# says outright "this isn't the date you're looking for."
+DIGIT_FALLBACK_EXCLUDED_LABELS = ("MFD",)
+
+
 def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
     """Fallback for label_anchor fields when no literal label is found at all
     in either OCR pass (see recognize_label_anchor_dual). Added 2026-09-24
@@ -338,9 +357,13 @@ def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
     tube_emboss_default's 10-char MFD+batch+mfg code) never gets truncated
     into a false 6-digit match - and keeps only runs that pass this
     field_type's own day/month/year int_range validation (rejects clearly-
-    wrong candidates like month=88). Never invents or edits digits, exactly
-    like find_label_anchor_match() - it only decides which already-detected
-    run to trust. Multiple distinct valid candidates -> ambiguous, same
+    wrong candidates like month=88). Pieces containing a DIGIT_FALLBACK_
+    EXCLUDED_LABELS entry (see its own comment) are skipped entirely before
+    any of that - a clean, correctly-formatted date sitting right next to
+    the literal word "MFD" is still the wrong field, not a valid unlabeled
+    candidate. Never invents or edits digits, exactly like
+    find_label_anchor_match() - it only decides which already-detected run
+    to trust. Multiple distinct valid candidates -> ambiguous, same
     never-guess rule as the label-anchor path.
 
     This is inherently less certain than a literal label match (no "EXP" to
@@ -350,6 +373,9 @@ def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
     digit_pattern = re.compile(r"(?<!\d)(\d{6})(?!\d)")
     hits = []
     for piece in pieces:
+        text_lower = piece["text"].lower()
+        if any(label.lower() in text_lower for label in DIGIT_FALLBACK_EXCLUDED_LABELS):
+            continue
         for m in digit_pattern.finditer(piece["text"]):
             digits = m.group(1)
             if validate_emboss_format(digits, format_cfg)["format_valid"]:
@@ -484,10 +510,11 @@ def group_zoomed_pieces_into_lines(pieces: list) -> list:
 
 
 def find_zoom_retry_match(image_bgr, ocr_engine, pieces: list, label: str) -> dict:
-    """Last-resort fallback for label_anchor fields, tried only after both
-    find_label_anchor_match() and find_digit_fallback_match() have already
-    failed on the full search image (see recognize_label_anchor_dual). Real
-    sample (2026-09-24): a printed label with MFG/EXP/LOT lines packed close
+    """Second attempt for label_anchor fields, tried right after
+    find_label_anchor_match() fails on the full search image and BEFORE
+    find_digit_fallback_match() (see recognize_label_anchor_dual - reordered
+    2026-09-24, see that function's docstring for why). Real sample
+    (2026-09-24): a printed label with MFG/EXP/LOT lines packed close
     together lost its EXP line's digits entirely at whole-image OCR
     resolution - the label text itself ("EXP:") was still detected as its
     own piece, just with no digits attached to it (dropped or fused into the
@@ -562,9 +589,28 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
     take the higher-confidence match but cap the returned confidence just
     under GEMINI_FALLBACK_THRESHOLD so the caller always routes it to
     LOW_CONFIDENCE. Neither side matches the label at all -> try
-    find_digit_fallback_match() across both passes' pieces before giving up
-    (see that function's docstring); still not detected -> caller reports
-    FORMAT_MISMATCH / label not found."""
+    find_zoom_retry_match() first, THEN find_digit_fallback_match() across
+    both passes' pieces before giving up; still not detected -> caller
+    reports FORMAT_MISMATCH / label not found.
+
+    zoom_retry is tried before digit_fallback (reordered 2026-09-24, real
+    sample: a Pond's tube where OCR split "EXP" and its digits "140627" into
+    two separate pieces on a physical line right next to an unrelated MFD
+    date, "MFD 140624 8 QFZ", detected as its own clean single piece).
+    digit_fallback has no idea a literal "EXP" exists anywhere - it just
+    grabs whatever isolated 6-digit run passes day/month/year validation -
+    so if it runs first and MFD's date happens to be the only (or the
+    highest-confidence) candidate it can find, it confidently returns the
+    WRONG date without ever attempting the anchor-aware zoom retry, which
+    exists precisely to recover the true EXP digits in this situation. Since
+    zoom_retry only fires at all when some piece already contains the
+    literal label (see its own docstring), running it first costs nothing
+    when the label is genuinely absent (it just returns unmatched
+    immediately) but gives the real anchor priority whenever the label IS
+    present, per COSMAX's explicit ask after seeing this exact MFD/EXP
+    mixup. If zoom_retry also can't resolve it (e.g. the zoomed re-OCR
+    itself misreads a digit), digit_fallback still runs as the last resort -
+    unchanged from before, just demoted one step."""
     raw_pieces = ocr_text_pieces(image_bgr, ocr_engine)
     raw_match = find_label_anchor_match(raw_pieces, label)
 
@@ -587,20 +633,6 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
     all_detected_text = "".join(p["text"] for p in raw_pieces) or "".join(p["text"] for p in sharp_pieces)
 
     if not raw_match.get("matched") and not sharp_match.get("matched"):
-        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg)
-        if fallback_match.get("matched"):
-            capped_confidence = min(fallback_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
-            return {
-                "detected": True,
-                "text": fallback_match["matched_text"],
-                "extracted_digits": fallback_match["extracted_digits"],
-                "confidence": round(capped_confidence, 4),
-                "agreement": None,
-                "match_method": "digit_fallback",
-                "date_format": None,
-                "all_detected_text": all_detected_text,
-            }
-
         zoom_match = find_zoom_retry_match(image_bgr, ocr_engine, raw_pieces, label)
         if zoom_match.get("matched"):
             capped_confidence = min(zoom_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
@@ -612,6 +644,20 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
                 "agreement": None,
                 "match_method": "zoom_retry",
                 "date_format": zoom_match["date_format"],
+                "all_detected_text": all_detected_text,
+            }
+
+        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg)
+        if fallback_match.get("matched"):
+            capped_confidence = min(fallback_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
+            return {
+                "detected": True,
+                "text": fallback_match["matched_text"],
+                "extracted_digits": fallback_match["extracted_digits"],
+                "confidence": round(capped_confidence, 4),
+                "agreement": None,
+                "match_method": "digit_fallback",
+                "date_format": None,
                 "all_detected_text": all_detected_text,
             }
 

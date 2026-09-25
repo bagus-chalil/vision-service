@@ -275,6 +275,52 @@ Endpoint `main.py`:
     match_method sama persis) — cuma sample Pond's yang berubah, dari
     `LABEL_NOT_FOUND` jadi resolved. Known gap item 10/11 soal sample
     Pond's ini sekarang RESOLVED.
+13. **`find_digit_fallback_match()` dipanggil SEBELUM `find_zoom_retry_match()`
+    di `recognize_label_anchor_dual()` sampai 2026-09-24 — urutannya DIBALIK**
+    (sekarang zoom_retry duluan, baru digit_fallback) setelah user melaporkan
+    hasil salah di sample tube Pond's UV Protect ("EXP 140627" di
+    crimp/shoulder + "MFD 140624 8 QFZ" tercetak di body, satu foto): OCR
+    pecah "EXP" dan "140627" jadi 2 piece terpisah (fisik saling menempel,
+    tapi PaddleOCR tetap deteksi sebagai 2 box beda), sementara
+    "MFD 140624 8 QFZ" kebaca bersih sebagai 1 piece. `find_digit_fallback_match()`
+    SAMA SEKALI tidak tahu ada literal "EXP" di foto — dia cuma ambil isolated
+    6-digit run mana pun yang lolos validasi day/month/year — jadi begitu dia
+    jalan duluan dan (di capture tertentu, misal setelah kompresi kamera)
+    cuma nemu SATU kandidat valid ("140624" dari MFD, karena piece "140627"
+    kebetulan tidak lolos/tidak terdeteksi di capture itu), dia langsung
+    confidently return itu sebagai tanggal EXP — padahal itu tanggal MFD,
+    salah field sama sekali — dan `find_zoom_retry_match()` (yang justru
+    didesain khusus buat kasus "EXP" ketemu tapi digitnya kepisah) tidak
+    pernah kebagian giliran coba dulu karena digit_fallback sudah "sukses"
+    (non-ambiguous) lebih dulu. Fix: `find_zoom_retry_match()` sekarang
+    dicoba LEBIH DULU begitu `find_label_anchor_match()` gagal di raw+sharp
+    pass — karena zoom_retry hanya jalan kalau ada piece yang literally
+    mengandung label ("EXP"), dia costless kalau labelnya memang tidak ada
+    sama sekali (langsung `{"matched": False}`), tapi kasih kesempatan
+    pertama ke anchor yang benar setiap kali labelnya ADA, sebelum
+    digit_fallback yang buta-konteks sempat menebak dari digit manapun.
+    `find_digit_fallback_match()` tetap jalan sebagai last-resort kalau
+    zoom_retry juga gagal (tidak dihapus, cuma didemosi 1 langkah).
+
+    **Regression-tested** ke sample Pond's yang sama persis (file PNG asli,
+    tanpa kompresi kamera): urutan lama maupun baru sama-sama menghasilkan
+    `DIGIT_FALLBACK_AMBIGUOUS` (karena di file asli ini, `find_zoom_retry_match()`
+    JUGA gagal — re-OCR band yang di-zoom salah baca karakter emboss "4"
+    jadi "A" akibat noise garis knurl di sekitarnya, `"EXP1A0"` + `"627"`,
+    sesuai gotcha #3 — jadi tetap tidak match pattern EXP+6digit persis).
+    Tapi ini justru hasil yang BENAR secara desain: sebelumnya (sesuai
+    laporan user, kemungkinan dari capture kamera browser yang lebih
+    terkompresi, bukan file PNG asli) sistem confidently return `"140624"`
+    (tanggal MFD, SALAH) sebagai jawaban `FORMAT_OK`/`LOW_CONFIDENCE` — versi
+    baru berubah jadi `DIGIT_FALLBACK_AMBIGUOUS` (kedua kandidat "140627" DAN
+    "140624" ketemu, tidak bisa dibedakan aman, jadi di-flag ambiguous) —
+    dari "salah tapi kelihatan valid" jadi "tidak yakin, minta REVIEW", sesuai
+    prinsip minimalkan false PASS. Kalau butuh sample ini resolve ke
+    `"140627"` yang benar (bukan cuma ambiguous), opsi lanjutan yang belum
+    diimplementasikan: exclude kandidat digit_fallback dari piece yang
+    mengandung label block lain yang dikenal (misal literal "MFD") — belum
+    dikerjakan karena itu keputusan desain baru (hardcode label kompetitor),
+    bukan sekadar reorder, jadi menunggu keputusan eksplisit user dulu.
 
 ## Status / progress log
 
@@ -325,6 +371,21 @@ Endpoint `main.py`:
       asli, regression-tested ke 32 foto - 31 lainnya hasilnya identik,
       cuma Pond's yang berubah dari `LABEL_NOT_FOUND` jadi resolved
       (`FORMAT_OK`, `LOW_CONFIDENCE`, capped confidence 0.84 by design).
+- [x] `find_digit_fallback_match()` vs `find_zoom_retry_match()` urutan
+      dibalik (2026-09-24, lihat item 13) — user lapor sample tube Pond's UV
+      Protect lain (EXP di crimp + MFD tercetak di body, satu foto) sempat
+      confidently return tanggal MFD sebagai kalau itu EXP, karena
+      digit_fallback (buta konteks, gak tahu ada literal "EXP") kebagian
+      giliran duluan dan nemu 1 kandidat non-ambiguous sebelum zoom_retry
+      (yang di-anchor ke piece "EXP" asli) sempat coba. Fix: zoom_retry
+      sekarang dicoba duluan setiap kali ada piece yang literally mengandung
+      label — digit_fallback tetap last-resort kalau zoom_retry juga gagal.
+      Regression-tested ke file PNG asli sample yang dilaporkan: hasil
+      berubah dari confidently-wrong (`140624`/MFD, `FORMAT_OK`) jadi
+      `DIGIT_FALLBACK_AMBIGUOUS` (both `140627`/EXP dan `140624`/MFD ketemu,
+      di-flag ambigu bukan ditebak) — sesuai prinsip minimalkan false PASS.
+      Opsi lanjutan (exclude kandidat dari piece berlabel lain seperti "MFD")
+      belum dikerjakan, nunggu keputusan eksplisit user.
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada
