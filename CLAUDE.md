@@ -44,7 +44,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `index.html` | Frontend UNIFIED single-file vanilla JS: 1 dropdown field_type gabungan dari kedua config di atas, upload file/camera capture, tombol Run → `POST /api/analyze` → render otomatis sesuai `data.pipeline` (tabel per-detection untuk generic, atau kv single-result + tube/crimp crop preview untuk tube_emboss) |
 | `tube_emboss.html` | Frontend standalone khusus tube emboss sub-pipeline (dev/debug only, hit `/api/tube-emboss/analyze` langsung) — dipertahankan terpisah dari `index.html`, tidak wajib dipakai user akhir |
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
-| `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py`, `diagnose_sharpening_ab.py` — keduanya `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` |
+| `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
 | `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
 | `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
 | `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
@@ -371,6 +371,33 @@ Endpoint `main.py`:
     foto ulang dengan sudut/pencahayaan yang mengurangi silau di foil emas
     dan posisi lebih dekat/stabil ke garis crimp, kalau field_type EXP/tube
     emboss hasilnya `LOW_CONFIDENCE` berulang di tube yang sama.
+15. **`find_digit_fallback_match()` bisa salah anggap 6-digit PERTAMA dari
+    kode `tube_emboss_default` (10 char) sebagai kandidat EXP (2026-09-25)** —
+    guard isolated-digit-run (`(?<!\d)(\d{6})(?!\d)`) di gotcha #11 cuma
+    melindungi dari digit yang nempel ke digit lain. Sample nyata (Pond's UV
+    Miracle, tube yang CUMA punya kode gabungan `310826QHB8`, tidak ada baris
+    EXP terpisah sama sekali) membuktikan guard itu tidak cukup: setelah 6
+    digit tanggalnya langsung diikuti HURUF ("Q"), bukan digit, jadi lookahead
+    `(?!\d)` lolos trivial dan `"310826"` ke-anggap kandidat EXP yang valid
+    padahal itu tanggal manufaktur dari kode lain. Fix: `find_digit_fallback_match()`
+    sekarang terima `other_format_configs` (semua field_type LAIN dari
+    `emboss_format_patterns.json`, bukan cuma field_type yang lagi dicari) —
+    sebelum piece dijadikan kandidat, cek dulu apakah SELURUH teks piece itu
+    sudah valid utuh sebagai format field_type lain (misal 10-char
+    `tube_emboss_default`); kalau ya, skip piece itu total. Ini data-driven
+    (baca config file), bukan hardcode label string kayak
+    `DIGIT_FALLBACK_EXCLUDED_LABELS` — field_type baru yang ditambah ke
+    config otomatis ikut terlindungi tanpa ubah kode. Diteruskan lewat
+    `analyze_tube_emboss()` → `analyze_label_anchor_field()` →
+    `recognize_label_anchor_dual()` → `find_digit_fallback_match()`.
+
+    **Regression-tested** ke 35 foto di `images/` (32 lama + 3 baru,
+    `tools/diagnose_exp_date_folder.py`): diff SEBELUM/SESUDAH fix cuma di 4
+    baris yang jadi target (semua `"310826"` false-positive berubah jadi
+    `LABEL_NOT_FOUND` yang benar) — 31 foto lainnya identik persis (termasuk
+    4 match `OK` via `label_anchor`, `zoom_retry` case Pond's/Elsheskin, dan
+    digit_fallback yang legit seperti `051228`/`150728`/`200628`/`120927`).
+    Tidak ada yang rusak.
 
 ## Status / progress log
 
@@ -446,6 +473,17 @@ Endpoint `main.py`:
       + `tube_exp_date` yang sudah di-regression-test, BUKAN full production
       architecture — item Laravel/React/kontrak final di bawah tetap belum
       dikerjakan).
+- [x] Fix false-positive digit_fallback (2026-09-25, lihat gotcha #15) —
+      `find_digit_fallback_match()` sekarang skip piece yang teksnya utuh
+      sudah valid sebagai format field_type LAIN (`other_format_configs`),
+      supaya kode 10-char `tube_emboss_default` gak ke-cannibalize jadi
+      kandidat EXP cuma karena 6 digit pertamanya kebetulan valid tanggal.
+      Regression-tested ke 35 foto (`tools/diagnose_exp_date_folder.py`,
+      script baru) — cuma 4 false-positive yang berubah, 31 lainnya identik.
+      3 foto real baru (`ponds_uvprotect_exp140627_mfd140624_closeup.jpg`,
+      `ponds_uvprotect_exp140627_wideshot_lowres.jpg`,
+      `ponds_uvmiracle_default_only_310826qhb8.jpg`) ditambahkan ke `images/`
+      sebagai fixture tetap.
 - [x] Diagnosis 2 laporan "trouble" dari real sample (2026-09-25, lihat
       gotcha #14) — dua-duanya dikonfirmasi BUKAN bug: sharpened-pass yang
       nyisipin digit palsu di depan kode (correctly di-cap LOW_CONFIDENCE
