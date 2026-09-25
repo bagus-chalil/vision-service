@@ -69,6 +69,10 @@
     <label class="field">Field type (for format validation)</label>
     <select id="fieldTypeSelect"><option value="">Loading...</option></select>
     <div class="field-desc" id="fieldTypeDesc"></div>
+    <label class="field-desc" style="margin-top:6px; cursor:pointer;">
+      <input type="checkbox" id="showAllFieldTypes" style="width:auto; vertical-align:middle;">
+      Show all field types (dev/testing only - includes formats not validated for pilot use)
+    </label>
 
     <label class="field">Tanggal mixing (ground-truth, optional - buat cross-check OCR EXP date)</label>
     <input type="date" id="referenceDateInput">
@@ -148,6 +152,7 @@ const resultTable = document.getElementById('resultTable');
 const resultBody = document.getElementById('resultBody');
 const fieldTypeSelect = document.getElementById('fieldTypeSelect');
 const fieldTypeDesc = document.getElementById('fieldTypeDesc');
+const showAllFieldTypes = document.getElementById('showAllFieldTypes');
 const referenceDateInput = document.getElementById('referenceDateInput');
 const roiNotes = document.getElementById('roiNotes');
 const singleResultTable = document.getElementById('singleResultTable');
@@ -159,6 +164,7 @@ const crimpCropImg = document.getElementById('crimpCropImg');
 let currentStream = null;
 let currentBlob = null;
 let fieldTypesByKey = {};
+let allFieldTypes = [];
 
 // --- Load field types from backend (merges field_patterns.json + emboss_format_patterns.json, each tagged with its pipeline) ---
 async function loadFieldTypes() {
@@ -166,22 +172,34 @@ async function loadFieldTypes() {
     const base = backendUrlInput.value.replace(/\/+$/, '');
     const resp = await fetch(base + '/api/field-types');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const types = await resp.json();
-    fieldTypesByKey = {};
-    fieldTypeSelect.innerHTML = '';
-    types.forEach((t) => {
-      fieldTypesByKey[t.key] = t;
-      const opt = document.createElement('option');
-      opt.value = t.key;
-      opt.textContent = t.label;
-      fieldTypeSelect.appendChild(opt);
-    });
-    updateFieldTypeDesc();
+    allFieldTypes = await resp.json();
+    renderFieldTypeOptions();
   } catch (err) {
     fieldTypeSelect.innerHTML = '<option value="">(failed to load - check backend URL)</option>';
     fieldTypeDesc.textContent = '';
   }
 }
+
+// pilot_ready: false marks field types not yet validated for field use (e.g.
+// wo_number/batch_no - still on the generic no-localization pipeline, see
+// CLAUDE.md). Hidden by default so pilot users can't accidentally pick them;
+// the checkbox exists purely for dev/testing against those fields locally.
+function renderFieldTypeOptions() {
+  const showAll = showAllFieldTypes.checked;
+  const types = allFieldTypes.filter((t) => showAll || t.pilot_ready !== false);
+  fieldTypesByKey = {};
+  fieldTypeSelect.innerHTML = '';
+  types.forEach((t) => {
+    fieldTypesByKey[t.key] = t;
+    const opt = document.createElement('option');
+    opt.value = t.key;
+    opt.textContent = t.label;
+    fieldTypeSelect.appendChild(opt);
+  });
+  updateFieldTypeDesc();
+}
+
+showAllFieldTypes.addEventListener('change', renderFieldTypeOptions);
 
 function updateFieldTypeDesc() {
   const t = fieldTypesByKey[fieldTypeSelect.value];

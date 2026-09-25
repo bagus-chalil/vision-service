@@ -12,7 +12,8 @@
     "description": "WO + 6 digits, e.g. WO123456",
     "pattern": "^WO\\d{6}$",
     "expected_length": 8,
-    "roi_hint": null
+    "roi_hint": null,
+    "pilot_ready": false
   },
 
   "batch_no": {
@@ -20,6 +21,7 @@
     "description": "8-digit numeric batch number",
     "pattern": "^\\d{8}$",
     "expected_length": 8,
-    "roi_hint": null
+    "roi_hint": null,
+    "pilot_ready": false
   }
 }

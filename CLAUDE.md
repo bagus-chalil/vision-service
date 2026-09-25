@@ -39,7 +39,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 |---|---|
 | `main.py` | FastAPI backend, PaddleOCR di-load sekali saat startup. Import `tube_emboss_pipeline` langsung (plain import, bukan package) — file ini harus tetap sejajar (sibling) dengan `tube_emboss_pipeline.py`. `/api/analyze` adalah entrypoint unified — dispatch ke pipeline generic atau tube_emboss berdasarkan field_type, lihat bagian Endpoint di bawah |
 | `tube_emboss_pipeline.py` | Sub-pipeline khusus emboss tutup tube: YOLO tube localize → crimp crop → OCR dual-pass (raw + sharpened) → `validate_emboss_format()` block-based (day/month/year/batch/mfg_code) |
-| `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`) untuk pipeline GENERIC (whole-image OCR, no localization) — dibaca ulang tiap request, edit langsung tanpa restart. `date_code` sudah DIHAPUS dari sini (Sep 2026) karena digantikan `tube_emboss_default` di `emboss_format_patterns.json` yang localization-nya benar — jangan tambahkan lagi field tube-emboss-related di file ini |
+| `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`) untuk pipeline GENERIC (whole-image OCR, no localization) — dibaca ulang tiap request, edit langsung tanpa restart. `date_code` sudah DIHAPUS dari sini (Sep 2026) karena digantikan `tube_emboss_default` di `emboss_format_patterns.json` yang localization-nya benar — jangan tambahkan lagi field tube-emboss-related di file ini. `wo_number`/`batch_no` sekarang punya `"pilot_ready": false` (2026-09-25, lihat status log) — field ini masih numpang generic pipeline tanpa localization, jadi disembunyikan dari dropdown pilot secara default |
 | `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) untuk pipeline TUBE_EMBOSS (YOLO localize + crop sebelum OCR) — juga dibaca ulang tiap request. Field_type dengan key di file ini otomatis di-route `/api/analyze` ke pipeline ini, TIDAK lewat field_patterns.json. Ada 2 entry: `tube_emboss_default` (MFD+batch+mfg, 10 char) dan `tube_exp_date` (EXP-only, 6 char DDMMYY, baris emboss terpisah dari MFD — lihat flow reference_date di bawah) |
 | `index.html` | Frontend UNIFIED single-file vanilla JS: 1 dropdown field_type gabungan dari kedua config di atas, upload file/camera capture, tombol Run → `POST /api/analyze` → render otomatis sesuai `data.pipeline` (tabel per-detection untuk generic, atau kv single-result + tube/crimp crop preview untuk tube_emboss) |
 | `tube_emboss.html` | Frontend standalone khusus tube emboss sub-pipeline (dev/debug only, hit `/api/tube-emboss/analyze` langsung) — dipertahankan terpisah dari `index.html`, tidak wajib dipakai user akhir |
@@ -315,12 +315,62 @@ Endpoint `main.py`:
     baru berubah jadi `DIGIT_FALLBACK_AMBIGUOUS` (kedua kandidat "140627" DAN
     "140624" ketemu, tidak bisa dibedakan aman, jadi di-flag ambiguous) —
     dari "salah tapi kelihatan valid" jadi "tidak yakin, minta REVIEW", sesuai
-    prinsip minimalkan false PASS. Kalau butuh sample ini resolve ke
-    `"140627"` yang benar (bukan cuma ambiguous), opsi lanjutan yang belum
-    diimplementasikan: exclude kandidat digit_fallback dari piece yang
-    mengandung label block lain yang dikenal (misal literal "MFD") — belum
-    dikerjakan karena itu keputusan desain baru (hardcode label kompetitor),
-    bukan sekadar reorder, jadi menunggu keputusan eksplisit user dulu.
+    prinsip minimalkan false PASS.
+
+    **UPDATE 2026-09-25 — opsi lanjutan di atas TERNYATA SUDAH diimplementasikan**
+    di commit yang sama (`92ac7bd`), cuma catatan ini belum di-sync: lihat
+    `DIGIT_FALLBACK_EXCLUDED_LABELS = ("MFD",)` di `find_digit_fallback_match()`
+    — piece yang mengandung literal "MFD" sekarang di-skip total sebelum
+    masuk pencarian isolated-6-digit, jadi kasus di atas seharusnya sudah
+    resolve ke `"140627"` (bukan cuma ambiguous) SELAMA "140627" itu sendiri
+    berhasil terbaca lengkap di salah satu pass. Confirmed re-test 2026-09-25
+    ke foto asli (`3.jpg`, real sample, bukan PNG lama) via `/api/analyze`
+    field_type `tube_exp_date`: exclusion-nya jalan (MFD's "140624" tidak
+    pernah muncul jadi kandidat), TAPI hasilnya tetap `LABEL_NOT_FOUND` untuk
+    sample INI karena masalah baru/berbeda — lihat gotcha #14: 3 digit
+    pertama emboss EXP ("140") gak terbaca sama sekali (bukan grup-tapi-gagal,
+    bukan ambiguous, literally invisible ke OCR) di raw, sharpened, MAUPUN
+    zoom_retry, jadi tidak ada kandidat 6-digit lengkap sama sekali untuk
+    di-exclude atau dipilih. Exclusion MFD ini tetap kerja seperti didesain,
+    cuma gak cukup buat sample yang emang separah ini.
+
+14. **Diagnosis real-sample 2026-09-25 (bukan bug, konfirmasi sistem bekerja
+    sesuai desain)** — user lapor 2 hasil "trouble" dari `index.html`, di-trace
+    langsung pakai foto asli (bukan screenshot) lewat `/api/analyze` yang
+    sama persis dipakai frontend:
+    - **Sharpened pass bisa menyisipkan digit palsu di AWAL kode** (sample
+      Pond's UV Miracle tutup tube, field_type `tube_emboss_default`): raw
+      pass baca `"310826QHB8"` (10 char, FORMAT_OK, confidence 98.5%),
+      sharpened pass baca `"1310826QHB8"` (11 char, ada "1" ekstra nempel di
+      depan — kemungkinan `preprocess_crimp_for_ocr()`'s sharpening
+      menangkap noise/pantulan di tepi crop jadi karakter palsu). Karena
+      `recognize_crimp_text_dual()` mendeteksi `raw_text != sharp_text`,
+      hasilnya correctly di-cap `LOW_CONFIDENCE` (bukan `OK`) — never-silently-
+      pick-a-side ini persis yang didesain di gotcha #3/prinsip
+      never-auto-correct. Raw pass kemungkinan besar benar, tapi sistem
+      sengaja gak percaya diri 100% dan minta konfirmasi manusia — ini
+      contoh nyata cross-check-nya jalan seperti seharusnya, bukan bug.
+    - **3 digit pertama emboss EXP bisa benar-benar tidak terbaca sama
+      sekali di SEMUA pass** (sample Pond's UV Protect, "EXP 140627" di
+      crimp + "MFD 140624 8 QFZ" di body, field_type `tube_exp_date`): trace
+      piece-by-piece nunjukin "140" dari "140627" jadi teks acak beda-beda
+      di tiap pass (`"MF00FZ"` di raw, `"TAI"` waktu zoom_retry) — cuma
+      "627" yang konsisten kebaca bersih di semua percobaan (raw, sharpened,
+      DAN zoom_retry yang khusus didesain buat kasus EXP+MFD berdempetan,
+      lihat item 12). Kemungkinan penyebab: posisi 3 digit itu pas kena
+      noise garis knurl/ridge tepi crimp yang berkilau (foil emas), sama
+      seperti gotcha #3 tapi kali ini separah "digit-nya ilang", bukan cuma
+      "ketambahan karakter". Karena gak ada satupun pass yang berhasil
+      merakit 6 digit lengkap yang valid, `LABEL_NOT_FOUND`/`LOW_CONFIDENCE`
+      adalah jawaban yang BENAR (bukan sistem gagal nyari, tapi digitnya
+      literally gak ada yang bisa dibaca) — lihat update di gotcha #13 soal
+      `DIGIT_FALLBACK_EXCLUDED_LABELS` yang sudah jalan tapi tetap gak cukup
+      buat sample seburuk ini.
+
+    **Actionable buat QC** (bukan sesuatu yang perlu di-patch di kode):
+    foto ulang dengan sudut/pencahayaan yang mengurangi silau di foil emas
+    dan posisi lebih dekat/stabil ke garis crimp, kalau field_type EXP/tube
+    emboss hasilnya `LOW_CONFIDENCE` berulang di tube yang sama.
 
 ## Status / progress log
 
@@ -386,6 +436,25 @@ Endpoint `main.py`:
       di-flag ambigu bukan ditebak) — sesuai prinsip minimalkan false PASS.
       Opsi lanjutan (exclude kandidat dari piece berlabel lain seperti "MFD")
       belum dikerjakan, nunggu keputusan eksplisit user.
+- [x] Field-level pilot gating (2026-09-25) — `/api/field-types` sekarang
+      return `pilot_ready` per field_type (`wo_number`/`batch_no` = `false`,
+      di `field_patterns.json`; default `true` kalau field gak set flag ini).
+      `index.html` filter dropdown-nya berdasarkan flag ini by default, ada
+      checkbox "Show all field types (dev/testing only)" buat nampilin field
+      yang belum matang saat testing lokal. Ini bagian dari persiapan pilot
+      internal terbatas (deploy scope masih terbatas ke `tube_emboss_default`
+      + `tube_exp_date` yang sudah di-regression-test, BUKAN full production
+      architecture — item Laravel/React/kontrak final di bawah tetap belum
+      dikerjakan).
+- [x] Diagnosis 2 laporan "trouble" dari real sample (2026-09-25, lihat
+      gotcha #14) — dua-duanya dikonfirmasi BUKAN bug: sharpened-pass yang
+      nyisipin digit palsu di depan kode (correctly di-cap LOW_CONFIDENCE
+      karena disagreement raw-vs-sharpened) dan kasus 3-digit EXP yang
+      literally gak kebaca di semua pass (correctly LABEL_NOT_FOUND karena
+      gak ada kandidat lengkap). Juga ketemu: catatan "belum dikerjakan" di
+      gotcha #13 soal exclude kandidat MFD dari digit_fallback itu STALE —
+      fiturnya (`DIGIT_FALLBACK_EXCLUDED_LABELS`) ternyata sudah ada dari
+      commit `92ac7bd`, cuma dokumentasinya belum di-sync.
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada

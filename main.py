@@ -209,6 +209,7 @@ def field_types():
                 "description": cfg.get("description"),
                 "expected_length": cfg.get("expected_length"),
                 "pipeline": "generic",
+                "pilot_ready": cfg.get("pilot_ready", True),
             }
         )
     for key, cfg in tube_emboss_pipeline.load_emboss_format_patterns().items():
@@ -219,6 +220,7 @@ def field_types():
                 "description": cfg.get("description"),
                 "expected_length": sum(b["width"] for b in cfg.get("blocks", [])) or None,
                 "pipeline": "tube_emboss",
+                "pilot_ready": cfg.get("pilot_ready", True),
             }
         )
     return merged

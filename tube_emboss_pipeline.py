@@ -344,7 +344,7 @@ def find_label_anchor_match(pieces: list, label: str) -> dict:
 DIGIT_FALLBACK_EXCLUDED_LABELS = ("MFD",)
 
 
-def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
+def find_digit_fallback_match(pieces: list, format_cfg: dict, other_format_configs: list = None) -> dict:
     """Fallback for label_anchor fields when no literal label is found at all
     in either OCR pass (see recognize_label_anchor_dual). Added 2026-09-24
     after a real sample tube cap ("AJA120927 PU") turned out to have no "EXP"
@@ -353,28 +353,51 @@ def find_digit_fallback_match(pieces: list, format_cfg: dict) -> dict:
     place (see emboss_format_patterns.json's tube_exp_date entry).
 
     Searches each OCR piece for an isolated 6-digit run - (?<!\\d) / (?!\\d)
-    guards mean a run that's actually part of a longer digit sequence (e.g.
-    tube_emboss_default's 10-char MFD+batch+mfg code) never gets truncated
-    into a false 6-digit match - and keeps only runs that pass this
-    field_type's own day/month/year int_range validation (rejects clearly-
-    wrong candidates like month=88). Pieces containing a DIGIT_FALLBACK_
-    EXCLUDED_LABELS entry (see its own comment) are skipped entirely before
-    any of that - a clean, correctly-formatted date sitting right next to
-    the literal word "MFD" is still the wrong field, not a valid unlabeled
-    candidate. Never invents or edits digits, exactly like
+    guards mean a run that's actually part of a longer ALL-DIGIT sequence
+    never gets truncated into a false 6-digit match - and keeps only runs
+    that pass this field_type's own day/month/year int_range validation
+    (rejects clearly-wrong candidates like month=88). Pieces containing a
+    DIGIT_FALLBACK_EXCLUDED_LABELS entry (see its own comment) are skipped
+    entirely before any of that - a clean, correctly-formatted date sitting
+    right next to the literal word "MFD" is still the wrong field, not a
+    valid unlabeled candidate. Never invents or edits digits, exactly like
     find_label_anchor_match() - it only decides which already-detected run
     to trust. Multiple distinct valid candidates -> ambiguous, same
     never-guess rule as the label-anchor path.
+
+    `other_format_configs` (2026-09-25) closes a gap the isolated-digit-run
+    guard above does NOT cover: tube_emboss_default's own code is DDMMYY
+    immediately followed by 3 alnum + 1 digit with no separator (e.g.
+    "310826QHB8") - since a LETTER, not a digit, follows the date, the
+    (?!\\d) lookahead is satisfied trivially and the leading "310826" still
+    matches as an "isolated" 6-digit run. A real sample (Pond's UV Miracle,
+    tube with ONLY that combined code, no separate EXP line at all)
+    confirmed this: digit_fallback confidently returned "310826" as an EXP
+    candidate purely because that tube's manufacture date happens to also be
+    a syntactically valid DDMMYY. Fix: before accepting a candidate, check
+    whether the WHOLE piece's text (not just the extracted digits) already
+    validates cleanly as a DIFFERENT known tube-emboss field_type's exact
+    format (caller passes every OTHER field_type's config from
+    emboss_format_patterns.json). A piece that's a clean whole match for
+    e.g. tube_emboss_default's 10-char shape is structurally that code, not
+    an unlabeled EXP date that happens to start with 6 valid digits - skip
+    it entirely, don't just downrank it. This is data-driven (reads
+    whatever other field_types exist in the config file) rather than a
+    hardcoded label string like DIGIT_FALLBACK_EXCLUDED_LABELS, so a future
+    new field_type entry is covered automatically without code changes.
 
     This is inherently less certain than a literal label match (no "EXP" to
     anchor on), so the caller always caps the returned confidence below
     GEMINI_FALLBACK_THRESHOLD - a digit-fallback match can never come back as
     a confident OK, only LOW_CONFIDENCE for human review."""
     digit_pattern = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+    other_format_configs = other_format_configs or []
     hits = []
     for piece in pieces:
         text_lower = piece["text"].lower()
         if any(label.lower() in text_lower for label in DIGIT_FALLBACK_EXCLUDED_LABELS):
+            continue
+        if any(validate_emboss_format(piece["text"], other_cfg)["format_valid"] for other_cfg in other_format_configs):
             continue
         for m in digit_pattern.finditer(piece["text"]):
             digits = m.group(1)
@@ -579,7 +602,7 @@ def find_zoom_retry_match(image_bgr, ocr_engine, pieces: list, label: str) -> di
     }
 
 
-def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: dict) -> dict:
+def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: dict, other_format_configs: list = None) -> dict:
     """Label-anchor equivalent of recognize_crimp_text_dual(): runs the
     anchor search on the raw image, and - unless that raw pass already
     resolved with a confident match - also on preprocess_crimp_for_ocr()'s
@@ -647,7 +670,7 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
                 "all_detected_text": all_detected_text,
             }
 
-        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg)
+        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg, other_format_configs)
         if fallback_match.get("matched"):
             capped_confidence = min(fallback_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
             return {
@@ -949,6 +972,7 @@ def analyze_label_anchor_field(
     debug: bool = False,
     image_ref: str = "unknown",
     reference_date: str = None,
+    other_format_configs: list = None,
 ) -> dict:
     """Anchor-based path for field_types with "label_anchor" set (see module
     docstring). Tries YOLO tube localization first to cut out background
@@ -960,12 +984,21 @@ def analyze_label_anchor_field(
     Uses LABEL_ANCHOR_MIN_TUBE_CONFIDENCE (higher than the default path's
     YOLO_MIN_CONFIDENCE) to decide whether to trust the bbox at all - see
     that constant's comment for why a false-accept here is worse than a
-    false-reject, unlike the default path."""
+    false-reject, unlike the default path.
+
+    `other_format_configs` (every OTHER field_type's config from
+    emboss_format_patterns.json, i.e. not this field's own format_cfg) is
+    forwarded to find_digit_fallback_match() via recognize_label_anchor_dual
+    - see find_digit_fallback_match()'s docstring for why (a piece that's a
+    clean whole match for a different field_type's exact format, e.g.
+    tube_emboss_default's 10-char code, should never be cannibalized for a
+    digit_fallback candidate here just because its leading 6 digits happen
+    to look like a valid date)."""
     localization = localize_tube(image_bgr, yolo_model, min_confidence=LABEL_ANCHOR_MIN_TUBE_CONFIDENCE)
     search_image = localization["tube_crop"] if localization["detected"] else image_bgr
     tube_detection_confidence = localization.get("confidence")
 
-    ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor, format_cfg)
+    ocr_result = recognize_label_anchor_dual(search_image, ocr_engine, label_anchor, format_cfg, other_format_configs)
 
     if not ocr_result["detected"]:
         if ocr_result.get("zoom_retry_ambiguous"):
@@ -1130,6 +1163,10 @@ def analyze_tube_emboss(
             debug=debug,
             image_ref=image_ref,
             reference_date=reference_date,
+            other_format_configs=[
+                cfg for key, cfg in format_config.items()
+                if key != resolved_field_type and isinstance(cfg, dict) and cfg.get("blocks")
+            ],
         )
 
     localization = localize_tube(image_bgr, yolo_model)
