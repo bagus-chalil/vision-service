@@ -78,6 +78,12 @@
     <input type="date" id="referenceDateInput">
     <div class="field-desc">Kalau diisi, dibandingkan persis (exact match) ke hasil OCR day/month/year - dipakai buat ngetes akurasi OCR, bukan aturan bisnis EXP harus sama dengan tanggal mixing.</div>
 
+    <div id="shelfLifeWrap" class="hidden">
+      <label class="field" for="shelfLifeInput">Shelf-life SKU ini (bulan) - buat hitung EXP dari MFD</label>
+      <input type="number" id="shelfLifeInput" min="1" max="120" step="1" placeholder="contoh: 36">
+      <div class="field-desc">Dihitung di browser (EXP = MFD hasil OCR + N bulan), bukan dari Vision Service. Shelf-life beda per SKU - isi sesuai SKU yang difoto. Aturan final nantinya di Laravel.</div>
+    </div>
+
     <label class="field">1. Get an image</label>
     <button id="btnPickFile">Upload from file</button>
     <input type="file" id="fileInput" accept="image/*" class="hidden">
@@ -154,6 +160,8 @@ const fieldTypeSelect = document.getElementById('fieldTypeSelect');
 const fieldTypeDesc = document.getElementById('fieldTypeDesc');
 const showAllFieldTypes = document.getElementById('showAllFieldTypes');
 const referenceDateInput = document.getElementById('referenceDateInput');
+const shelfLifeWrap = document.getElementById('shelfLifeWrap');
+const shelfLifeInput = document.getElementById('shelfLifeInput');
 const roiNotes = document.getElementById('roiNotes');
 const singleResultTable = document.getElementById('singleResultTable');
 const mismatchNote = document.getElementById('mismatchNote');
@@ -204,6 +212,46 @@ showAllFieldTypes.addEventListener('change', renderFieldTypeOptions);
 function updateFieldTypeDesc() {
   const t = fieldTypesByKey[fieldTypeSelect.value];
   fieldTypeDesc.textContent = t && t.description ? t.description : '';
+  shelfLifeWrap.classList.toggle('hidden', !(t && t.exp_from_shelf_life));
+}
+
+// DDMMYY + N months -> DDMMYY. Returns {error} instead of rolling over when
+// the day doesn't exist in the target month (e.g. 310124 + 1): how a SKU's
+// EXP handles that is a business rule, so it's flagged, never guessed.
+function addMonthsDDMMYY(ddmmyy, months) {
+  const day = parseInt(ddmmyy.slice(0, 2), 10);
+  const month = parseInt(ddmmyy.slice(2, 4), 10);
+  const year = 2000 + parseInt(ddmmyy.slice(4, 6), 10);
+  const total = year * 12 + (month - 1) + months;
+  const newYear = Math.floor(total / 12);
+  const newMonth = (total % 12) + 1;
+  const daysInMonth = new Date(newYear, newMonth, 0).getDate();
+  if (day > daysInMonth) {
+    return { error: `tanggal ${day} tidak ada di bulan ${newMonth}/${newYear} - cek manual` };
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  return { value: pad(day) + pad(newMonth) + pad(newYear % 100) };
+}
+
+function computedExpRows(data) {
+  const t = fieldTypesByKey[data.field_type];
+  if (!t || !t.exp_from_shelf_life) return [];
+  const months = parseInt(shelfLifeInput.value, 10);
+  if (!months || months < 1) {
+    return [['computed_exp', '<span class="field-desc">isi shelf-life (bulan) untuk menghitung</span>']];
+  }
+  if (data.format_valid !== true || !data.extracted_date_code) {
+    return [['computed_exp', '<span class="field-desc">tidak dihitung - MFD tidak terbaca valid</span>']];
+  }
+  const result = addMonthsDDMMYY(data.extracted_date_code, months);
+  if (result.error) {
+    return [['computed_exp', `<b style="color:#b91c1c">${escapeHtml(result.error)}</b>`]];
+  }
+  let cell = `<b>${escapeHtml(result.value)}</b> <span class="field-desc">(MFD ${escapeHtml(data.extracted_date_code)} + ${months} bulan, dihitung di browser - bukan hasil OCR)</span>`;
+  if (data.status !== 'OK') {
+    cell += `<div class="field-desc" style="color:#b45309">MFD-nya ${escapeHtml(data.status)} - hasil hitungan ini ikut perlu dicek manusia.</div>`;
+  }
+  return [['computed_exp', cell]];
 }
 
 fieldTypeSelect.addEventListener('change', updateFieldTypeDesc);
@@ -439,6 +487,7 @@ function renderTubeEmbossResult(data) {
   } else if (data.date_check && data.date_check.reason && data.date_check.reason !== 'NO_REFERENCE_DATE') {
     rows.push(['date_check', `<span class="field-desc">not checked - ${escapeHtml(data.date_check.reason)}</span>`]);
   }
+  rows.push(...computedExpRows(data));
 
   singleResultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   singleResultTable.classList.remove('hidden');

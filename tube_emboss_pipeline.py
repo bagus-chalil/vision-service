@@ -344,7 +344,7 @@ def find_label_anchor_match(pieces: list, label: str) -> dict:
 DIGIT_FALLBACK_EXCLUDED_LABELS = ("MFD",)
 
 
-def find_digit_fallback_match(pieces: list, format_cfg: dict, other_format_configs: list = None) -> dict:
+def find_digit_fallback_match(pieces: list, format_cfg: dict, other_format_configs: list = None, label: str = None) -> dict:
     """Fallback for label_anchor fields when no literal label is found at all
     in either OCR pass (see recognize_label_anchor_dual). Added 2026-09-24
     after a real sample tube cap ("AJA120927 PU") turned out to have no "EXP"
@@ -386,16 +386,32 @@ def find_digit_fallback_match(pieces: list, format_cfg: dict, other_format_confi
     hardcoded label string like DIGIT_FALLBACK_EXCLUDED_LABELS, so a future
     new field_type entry is covered automatically without code changes.
 
+    `label` (2026-09-28, added alongside the tube_mfd_date field_type) is the
+    literal label this call is searching for. The skip list is
+    DIGIT_FALLBACK_EXCLUDED_LABELS plus every OTHER field_type's own
+    label_anchor from other_format_configs, minus `label` itself: a
+    regression run of tube_mfd_date over images/ returned the EXP date as
+    MFD on 5 photos ("EXP 210428", "EXP.130927", ...) because only "MFD"
+    was hardcoded as excluded, never "EXP" - and excluding the searched
+    label itself keeps a field from rejecting its own label.
+
     This is inherently less certain than a literal label match (no "EXP" to
     anchor on), so the caller always caps the returned confidence below
     GEMINI_FALLBACK_THRESHOLD - a digit-fallback match can never come back as
     a confident OK, only LOW_CONFIDENCE for human review."""
     digit_pattern = re.compile(r"(?<!\d)(\d{6})(?!\d)")
     other_format_configs = other_format_configs or []
+    candidate_excluded = list(DIGIT_FALLBACK_EXCLUDED_LABELS) + [
+        cfg["label_anchor"] for cfg in other_format_configs if cfg.get("label_anchor")
+    ]
+    active_excluded_labels = [
+        excluded for excluded in candidate_excluded
+        if not label or excluded.lower() != label.lower()
+    ]
     hits = []
     for piece in pieces:
         text_lower = piece["text"].lower()
-        if any(label.lower() in text_lower for label in DIGIT_FALLBACK_EXCLUDED_LABELS):
+        if any(excluded.lower() in text_lower for excluded in active_excluded_labels):
             continue
         if any(validate_emboss_format(piece["text"], other_cfg)["format_valid"] for other_cfg in other_format_configs):
             continue
@@ -670,7 +686,12 @@ def recognize_label_anchor_dual(image_bgr, ocr_engine, label: str, format_cfg: d
                 "all_detected_text": all_detected_text,
             }
 
-        fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg, other_format_configs)
+        # Off for fields whose unlabeled digits are indistinguishable from
+        # another field's (tube_mfd_date: a bare 6-digit date is usually EXP).
+        if format_cfg.get("digit_fallback", True):
+            fallback_match = find_digit_fallback_match(raw_pieces + sharp_pieces, format_cfg, other_format_configs, label=label)
+        else:
+            fallback_match = {"matched": False}
         if fallback_match.get("matched"):
             capped_confidence = min(fallback_match["confidence"], GEMINI_FALLBACK_THRESHOLD - 0.01)
             return {

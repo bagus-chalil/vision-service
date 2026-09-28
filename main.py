@@ -240,6 +240,7 @@ def field_types():
                 "expected_length": sum(b["width"] for b in cfg.get("blocks", [])) or None,
                 "pipeline": "tube_emboss",
                 "pilot_ready": cfg.get("pilot_ready", True),
+                "exp_from_shelf_life": cfg.get("exp_from_shelf_life", False),
             }
         )
     return merged

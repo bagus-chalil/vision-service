@@ -40,7 +40,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `main.py` | FastAPI backend, PaddleOCR di-load sekali saat startup. Import `tube_emboss_pipeline` langsung (plain import, bukan package) — file ini harus tetap sejajar (sibling) dengan `tube_emboss_pipeline.py`. `/api/analyze` adalah entrypoint unified — dispatch ke pipeline generic atau tube_emboss berdasarkan field_type, lihat bagian Endpoint di bawah |
 | `tube_emboss_pipeline.py` | Sub-pipeline khusus emboss tutup tube: YOLO tube localize → crimp crop → OCR dual-pass (raw + sharpened) → `validate_emboss_format()` block-based (day/month/year/batch/mfg_code) |
 | `field_patterns.json` | Config regex per `field_type` (`pattern`, `expected_length`, `description`, `roi_hint`) untuk pipeline GENERIC (whole-image OCR, no localization) — dibaca ulang tiap request, edit langsung tanpa restart. `date_code` sudah DIHAPUS dari sini (Sep 2026) karena digantikan `tube_emboss_default` di `emboss_format_patterns.json` yang localization-nya benar — jangan tambahkan lagi field tube-emboss-related di file ini. `wo_number`/`batch_no` sekarang punya `"pilot_ready": false` (2026-09-25, lihat status log) — field ini masih numpang generic pipeline tanpa localization, jadi disembunyikan dari dropdown pilot secara default |
-| `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) untuk pipeline TUBE_EMBOSS (YOLO localize + crop sebelum OCR) — juga dibaca ulang tiap request. Field_type dengan key di file ini otomatis di-route `/api/analyze` ke pipeline ini, TIDAK lewat field_patterns.json. Ada 2 entry: `tube_emboss_default` (MFD+batch+mfg, 10 char) dan `tube_exp_date` (EXP-only, 6 char DDMMYY, baris emboss terpisah dari MFD — lihat flow reference_date di bawah) |
+| `emboss_format_patterns.json` | Config block-based (`day`/`month`/`year` = `int_range`, `batch_1..3`/`mfg_code` = `charset`) untuk pipeline TUBE_EMBOSS (YOLO localize + crop sebelum OCR) — juga dibaca ulang tiap request. Field_type dengan key di file ini otomatis di-route `/api/analyze` ke pipeline ini, TIDAK lewat field_patterns.json. Ada 3 entry: `tube_emboss_default` (MFD+batch+mfg, 10 char), `tube_exp_date` (EXP-only, 6 char DDMMYY, baris emboss terpisah dari MFD — lihat flow reference_date di bawah), dan `tube_mfd_date` (MFD print di body, `label_anchor: "MFD"`, `digit_fallback: false`, `exp_from_shelf_life: true` — lihat gotcha #18) |
 | `index.html` | Frontend UNIFIED single-file vanilla JS: 1 dropdown field_type gabungan dari kedua config di atas, upload file/camera capture, tombol Run → `POST /api/analyze` → render otomatis sesuai `data.pipeline` (tabel per-detection untuk generic, atau kv single-result + tube/crimp crop preview untuk tube_emboss) |
 | `tube_emboss.html` | Frontend standalone khusus tube emboss sub-pipeline (dev/debug only, hit `/api/tube-emboss/analyze` langsung) — dipertahankan terpisah dari `index.html`, tidak wajib dipakai user akhir |
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
@@ -426,6 +426,69 @@ Endpoint `main.py`:
     berkali-kali], thread-pool offload [event loop bebas tapi tetap
     CPU-core-bound], atau queue terpisah) — murni observasi, nunggu
     keputusan eksplisit user kalau/kapan concurrency jadi kebutuhan nyata.
+17. **2 foto real-sample "gagal" yang dilaporkan user (2026-09-28) dikonfirmasi
+    BUKAN bug, dua penyebab fisik berbeda — field_type `tube_exp_date`:**
+    - **Klip/penjepit fisik bisa menutupi digit emboss-nya sendiri** (tube
+      "POND'S SKIN INSTITUTE"): dari foto, klip hitam yang dipakai buat
+      menjepit crimp saat pemotretan menutupi tepat satu digit di tengah kode
+      ("EXP 3⬛0229") — bukan soal OCR gagal baca, framenya sendiri memang
+      gak punya info digit itu. `LABEL_NOT_FOUND` di sini benar; gak ada
+      perbaikan kode yang bisa menolong kasus ini, cuma foto ulang dengan
+      klip dipindah dari area emboss.
+    - **Sample kedua adalah sample yang SAMA PERSIS dengan gotcha #14**
+      (tube "POND'S UV PROTECT SUN SERUM", "EXP 140627" + "MFD 140624 8 QFZ"
+      di foto yang sama) — re-test menghasilkan `LABEL_NOT_FOUND` yang
+      identik, konsisten dengan root cause yang sudah didiagnosis (3 digit
+      pertama EXP gak kebaca di raw/sharpened/zoom_retry akibat
+      glare/knurl di foil emas). Bukan regresi baru.
+
+    Actionable buat QC (sama seperti gotcha #14): pastikan klip/penjepit
+    yang dipakai buat motret gak menutupi garis emboss-nya, dan untuk tube
+    foil emas coba sudut/pencahayaan yang mengurangi silau di garis crimp.
+18. **Field_type `tube_mfd_date` (2026-09-28) — baca MFD yang di-PRINT di body
+    tube** (misal "MFD 140624 8 QFZ" di Pond's UV Protect), sebagai pendamping
+    `tube_exp_date` kalau EXP di crimp gak kebaca (glare/klip, gotcha #14/#17).
+    Cuma entry config (`label_anchor: "MFD"`), reuse jalur label_anchor +
+    zoom_retry yang sudah ada. **Vision Service (API) TIDAK menghitung EXP =
+    MFD + shelf-life** — shelf-life aturan bisnis per-SKU, aturan final-nya
+    tetap buat Laravel. Sebagai alat testing sementara, `index.html` punya
+    kalkulator client-side: flag config `exp_from_shelf_life: true`
+    (diteruskan `/api/field-types`, jadi JS tetap gak hardcode field key)
+    memunculkan input "Shelf-life (bulan)" yang diisi QC per SKU, lalu
+    `computed_exp` = MFD hasil OCR + N bulan ditampilkan di tabel hasil
+    (dilabeli "dihitung di browser - bukan hasil OCR"). Aturannya: cuma
+    dihitung kalau `format_valid` true; kalau tanggal-nya gak ada di bulan
+    tujuan (misal 31 + 1 bulan → Februari) di-flag "cek manual", GAK
+    di-roll-over/clamp (cara SKU menangani itu aturan bisnis); kalau status
+    MFD bukan `OK`, ada peringatan hasil hitungan ikut perlu review.
+    Confirmed end-to-end 2026-09-28: sample
+    `ponds_uvprotect_exp140627_mfd140624_closeup.jpg` → MFD `140624` + 36
+    bulan = `140627`, sama dengan EXP asli di crimp (yang `tube_exp_date`
+    gagal baca, gotcha #14). Dua jebakan yang
+    ketemu dari regression run pertama ke 36 foto `images/` (7 foto
+    mengembalikan tanggal EXP sebagai MFD):
+    - `DIGIT_FALLBACK_EXCLUDED_LABELS` cuma hardcode `("MFD",)` → saat cari
+      MFD, piece "EXP 210428" gak di-skip. Fix: `find_digit_fallback_match()`
+      sekarang terima `label` dan skip list-nya = hardcoded + `label_anchor`
+      milik semua field_type LAIN di config, dikurangi label yang sedang
+      dicari (supaya field gak menolak labelnya sendiri).
+    - Digit tanpa label sama sekali ("AJA120927 PU") secara fisik gak bisa
+      dibedakan EXP atau MFD → flag config baru `"digit_fallback": false`
+      (default `true`) mematikan digit_fallback per field_type;
+      `tube_mfd_date` pakai `false`, jadi tanpa literal "MFD" hasilnya
+      `LABEL_NOT_FOUND`, bukan nebak.
+
+    **Regression setelah fix** (36 foto): `tube_exp_date` identik dengan run
+    sebelum fix; `tube_mfd_date` cuma 2 match, dua-duanya benar (`140624`
+    di `Media (5).jpg` dan `ponds_uvprotect_exp140627_mfd140624_closeup.jpg`),
+    tapi dua-duanya `LOW_CONFIDENCE` (confidence di-cap 0.84 — raw vs
+    sharpened pass gak sepakat), belum pernah `OK`. Label cetak "MFG" (bukan
+    "MFD", misal sample Elsheskin 11.31.20) TIDAK ke-match — kalau butuh,
+    tambah entry/label baru, jangan longgarkan regex-nya. `pilot_ready`
+    di-set `true` (default) atas permintaan eksplisit user 2026-09-28,
+    walau baru terbukti di 2 foto real — aman dari sisi false PASS karena
+    tanpa digit_fallback field ini cuma bisa match dari literal "MFD", dan
+    hasilnya sejauh ini selalu `LOW_CONFIDENCE` (masuk review manusia).
 
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
@@ -669,6 +732,20 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       gotcha #13 soal exclude kandidat MFD dari digit_fallback itu STALE —
       fiturnya (`DIGIT_FALLBACK_EXCLUDED_LABELS`) ternyata sudah ada dari
       commit `92ac7bd`, cuma dokumentasinya belum di-sync.
+- [x] Diagnosis 2 foto real-sample "gagal" lain dari user (2026-09-28, lihat
+      gotcha #17) — keduanya dikonfirmasi BUKAN bug: satu klip fisik yang
+      dipakai buat motret ternyata menutupi salah satu digit emboss-nya
+      sendiri (LABEL_NOT_FOUND yang benar, gak ada info digit di framenya),
+      satu lagi sample yang sama persis dengan kasus di gotcha #14 (3 digit
+      EXP gak kebaca akibat glare foil), re-test hasilnya identik/konsisten.
+- [x] Field_type `tube_mfd_date` (2026-09-28, lihat gotcha #18) — baca MFD
+      print di body sebagai pendamping EXP crimp yang sering gak kebaca.
+      Plus fix `digit_fallback` (exclusion label data-driven + flag
+      `digit_fallback: false` per field). `pilot_ready: true`.
+- [x] Kalkulator EXP = MFD + shelf-life (bulan) client-side di `index.html`
+      (2026-09-28, gotcha #18) — alat testing, API Vision Service gak berubah
+- [ ] Aturan shelf-life per SKU + cross-check EXP final di Laravel (master
+      data shelf-life per SKU, bukan input manual QC)
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada

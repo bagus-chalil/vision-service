@@ -24,5 +24,18 @@
       { "name": "month", "width": 2, "type": "int_range", "min": 1, "max": 12 },
       { "name": "year",  "width": 2, "type": "int_range", "min": 0, "max": 99 }
     ]
+  },
+
+  "tube_mfd_date": {
+    "label": "Tube MFD Date (DDMMYY, printed near 'MFD' label)",
+    "description": "Manufacture date PRINTED (not embossed) near a literal 'MFD' label, typically on the tube body rather than the crimp (confirmed 2026-09-28 from a real Pond's UV Protect sample: 'MFD 140624 8 QFZ' printed on the body, while the crimp only carries a separate embossed EXP-only code) - format DDMMYY only (day 01-31, month 01-12, year 00-99), e.g. MFD 140624 -> day=14 month=06 year=24. Added as a more reliable companion to tube_exp_date: printed body text has much higher contrast than gold-foil crimp emboss, which is prone to glare/knurl noise (see tube_emboss_pipeline.py gotchas) and to physical occlusion (e.g. a QC clip covering part of the crimp). Reuses the same label_anchor path as tube_exp_date (label_anchor + zoom_retry), but with 'digit_fallback': false - an unlabeled 6-digit date can't be told apart from an EXP date (a 2026-09-28 regression over images/ returned EXP dates as MFD on 7 photos with fallback on), so without a literal 'MFD' this field reports LABEL_NOT_FOUND rather than guessing. Vision Service still only reports this OCR'd value as-is; it does NOT compute or cross-check an expected EXP date from it (e.g. MFD + shelf-life) - shelf-life duration is SKU-specific business logic and stays out of Vision Service per this project's settled architecture (see CLAUDE.md 'Prinsip desain'). 'exp_from_shelf_life': true only tells the test frontend (index.html) to offer a client-side EXP = MFD + N months calculator with a QC-entered shelf-life; the API response is unchanged.",
+    "label_anchor": "MFD",
+    "digit_fallback": false,
+    "exp_from_shelf_life": true,
+    "blocks": [
+      { "name": "day",   "width": 2, "type": "int_range", "min": 1, "max": 31 },
+      { "name": "month", "width": 2, "type": "int_range", "min": 1, "max": 12 },
+      { "name": "year",  "width": 2, "type": "int_range", "min": 0, "max": 99 }
+    ]
   }
 }
