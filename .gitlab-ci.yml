@@ -1,11 +1,11 @@
 # CI/CD for the Vision Service pilot VPS.
 #
 # GitHub stays the source of truth (see .github/workflows/mirror-to-gitlab.yml
-# in the mirrored repo) - this pipeline only runs after code lands here via
-# that mirror push. Both stages run on the single self-hosted runner
-# registered directly on the pilot VPS itself (tag: vps-aiocr, see
-# ops/provision_vps.sh) - there is no other runner in this project.
-#
+# in the mirrored repo) - this pipeline only runs for the 'production' branch,
+# which exists ONLY to drive this pilot deploy (not a day-to-day dev branch).
+# Both stages run on the single self-hosted runner registered directly on
+# the pilot VPS itself (tag: vps-aiocr, see ops/provision_vps.sh) - there is
+# no other runner in this project.
 # "validate" is a cheap syntax/config sanity check using whatever python3 the
 # runner's OS ships (no venv, no heavy deps - just stdlib). "deploy" is where
 # the real smoke test happens, INSIDE the freshly-installed venv, before the
@@ -19,7 +19,7 @@ validate:
   stage: validate
   tags: [vps-aiocr]
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "production"'
   script:
     - python3 -m py_compile main.py tube_emboss_pipeline.py
     - python3 -c "import json; json.load(open('field_patterns.json'))"
@@ -29,7 +29,7 @@ deploy:
   stage: deploy
   tags: [vps-aiocr]
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "production"'
   environment:
     name: pilot-vps
   script:

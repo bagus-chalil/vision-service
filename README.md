@@ -162,11 +162,19 @@ untuk latihan praktik CI/CD ke sebuah Proxmox VPS kosongan (4 vCPU / 4GB RAM
 / 32GB disk, Ubuntu 26.04). **GitHub tetap source of truth**; GitLab cuma
 jadi tempat pipeline jalan.
 
-Alur: push ke GitHub → `.github/workflows/mirror-to-gitlab.yml` push-mirror
-ke project GitLab → `.gitlab-ci.yml` di GitLab jalan otomatis → job `deploy`
-dieksekusi oleh GitLab Runner yang terdaftar **di VPS itu sendiri** (bukan
-runner terpisah yang SSH masuk) → `ops/deploy.sh` sync kode + install deps +
-smoke test + restart service.
+Alur: push/merge ke branch **`production`** di GitHub →
+`.github/workflows/mirror-to-gitlab.yml` push-mirror *khusus branch ini* ke
+project GitLab → `.gitlab-ci.yml` di GitLab jalan otomatis (di-gate ke
+`CI_COMMIT_BRANCH == "production"`) → job `deploy` dieksekusi oleh GitLab
+Runner yang terdaftar **di VPS itu sendiri** (bukan runner terpisah yang SSH
+masuk) → `ops/deploy.sh` sync kode + install deps + smoke test + restart
+service.
+
+Branch `production` sengaja dipisah dari `main`/`v1.0.0` — isinya sama
+persis (dibuat dari situ), tapi satu-satunya fungsinya cuma jadi pemicu
+pipeline pilot ini. Kerja harian tetap di `main`/`v1.0.0` seperti biasa;
+begitu ada perubahan yang mau benar-benar di-pilot-kan ke VPS, merge/push ke
+`production`.
 
 Kenapa **native (venv + systemd), bukan Docker**: image Docker untuk stack
 ini (torch + paddlepaddle + ultralytics + opencv) gampang tembus 3–4GB, plus
@@ -184,9 +192,10 @@ Windows — bisa menghabiskan disk 32GB percuma. Jangan hapus baris itu.
 
 1. Buat project GitLab (mirror dari `bagus-chalil/vision-service`), simpan
    URL + Project Access Token (scope `write_repository`) sebagai GitHub
-   Actions secrets di repo GitHub: `GITLAB_MIRROR_HOST`
-   (`gitlab.com/<namespace>/<project>.git`, tanpa `https://`) dan
-   `GITLAB_MIRROR_TOKEN`.
+   Actions secrets di repo GitHub: `GITLAB_PROJECT_URL`
+   (`https://gitlab.com/<namespace>/<project>`, dengan `https://`) dan
+   `GITLAB_TOKEN`. *(Sudah dibuat: `GITLAB_PROJECT_URL` →
+   `https://gitlab.com/cosmaxidn/vision-service`, `GITLAB_TOKEN` → token.)*
 2. Clone repo ini ke VPS (sementara, buat bootstrap saja), lalu jalankan
    sekali sebagai root:
    ```bash
@@ -207,9 +216,10 @@ Windows — bisa menghabiskan disk 32GB percuma. Jangan hapus baris itu.
 4. Deploy pertama kali manual (sebelum pipeline ada history):
    `sudo /usr/local/bin/vision-service-deploy.sh /root/bootstrap`.
 
-Setelah itu, push ke `main` di GitHub → otomatis sampai ke VPS. Detail
-desain (kenapa 1 script privileged, kenapa smoke test jalan sebelum restart
-service, dll) ada di komentar masing-masing file `ops/*.sh`.
+Setelah itu, push/merge ke branch `production` di GitHub → otomatis sampai
+ke VPS. Detail desain (kenapa 1 script privileged, kenapa smoke test jalan
+sebelum restart service, dll) ada di komentar masing-masing file
+`ops/*.sh`.
 
 ## Known issues / workarounds
 
