@@ -1,0 +1,40 @@
+name: Mirror to GitLab (CI/CD trigger)
+#
+# GitHub tetap "source of truth" untuk repo ini. Workflow ini cuma push-mirror
+# setiap commit/tag ke project GitLab yang sudah didaftarkan runner-nya di
+# VPS - begitu GitLab nerima push, .gitlab-ci.yml di sana yang jalan (test +
+# deploy). Ini menghindari fitur "pull mirror + auto-trigger pipeline" milik
+# GitLab yang di sebagian tier berbayar; push biasa dari sini selalu gratis
+# dan selalu men-trigger pipeline GitLab standar.
+#
+# Setup sekali di GitHub repo settings > Secrets and variables > Actions:
+#   - GITLAB_MIRROR_HOST  : gitlab.com/<namespace>/<project>.git
+#                           (TANPA "https://" di depan - scheme ditambah di step di bawah)
+#   - GITLAB_MIRROR_TOKEN : GitLab Project Access Token (scope: write_repository)
+
+on:
+  push:
+    branches:
+      - main
+      - v1.0.0
+    tags:
+      - "*"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push mirror to GitLab
+        run: |
+          set -euo pipefail
+          git remote add gitlab "https://oauth2:${GITLAB_MIRROR_TOKEN}@${GITLAB_MIRROR_HOST}"
+          git push gitlab --all
+          git push gitlab --tags
+        env:
+          GITLAB_MIRROR_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+          GITLAB_MIRROR_HOST: ${{ secrets.GITLAB_MIRROR_HOST }}

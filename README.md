@@ -119,7 +119,7 @@ Ada 2 config, pilih sesuai kebutuhan field-nya:
   kedua config — dicocokkan apa adanya ke pattern. Kalau mismatch, itu tetap
   harus direview manusia, bukan ditebak/dipotong otomatis.
 
-## Deploy checklist (pilot ke server baru, mis. `.24`)
+## Deploy checklist (manual, Windows/on-prem — mis. `.24`)
 
 1. `git clone` repo ini — `models/tube_detector_v1/best.pt` (YOLO tube
    detector) sudah ikut ter-commit, jadi tidak perlu download model
@@ -154,6 +154,62 @@ Ada 2 config, pilih sesuai kebutuhan field-nya:
 Ini semua masih pilot-scope (LAN internal, field `tube_emboss_default` +
 `tube_exp_date` saja) — bukan production architecture penuh (Laravel/React/
 kontrak API final masih belum dikerjakan, lihat `CLAUDE.md`).
+
+## Pilot via GitLab CI/CD ke VPS (jalur latihan DevOps, terpisah dari `.24`)
+
+Ini jalur **kedua**, terpisah dari deploy manual ke `.24` di atas — dipakai
+untuk latihan praktik CI/CD ke sebuah Proxmox VPS kosongan (4 vCPU / 4GB RAM
+/ 32GB disk, Ubuntu 26.04). **GitHub tetap source of truth**; GitLab cuma
+jadi tempat pipeline jalan.
+
+Alur: push ke GitHub → `.github/workflows/mirror-to-gitlab.yml` push-mirror
+ke project GitLab → `.gitlab-ci.yml` di GitLab jalan otomatis → job `deploy`
+dieksekusi oleh GitLab Runner yang terdaftar **di VPS itu sendiri** (bukan
+runner terpisah yang SSH masuk) → `ops/deploy.sh` sync kode + install deps +
+smoke test + restart service.
+
+Kenapa **native (venv + systemd), bukan Docker**: image Docker untuk stack
+ini (torch + paddlepaddle + ultralytics + opencv) gampang tembus 3–4GB, plus
+overhead Docker daemon sendiri — terlalu berisiko di RAM 4GB/disk 32GB.
+Revisit kalau VM di-upgrade nanti.
+
+**Gotcha penting**: `requirements.txt` sekarang menyertakan
+`--extra-index-url https://download.pytorch.org/whl/cpu` di baris atas.
+Tanpa ini, `pip install torch==2.14.0` di Linux x86_64 resolve ke build
+CUDA-enabled (beberapa GB paket `nvidia-*-cu12` yang gak kepakai sama
+sekali di VPS tanpa GPU ini) alih-alih build `+cpu` yang sudah divalidasi di
+Windows — bisa menghabiskan disk 32GB percuma. Jangan hapus baris itu.
+
+### Setup sekali di VPS (sebelum pipeline pertama jalan)
+
+1. Buat project GitLab (mirror dari `bagus-chalil/vision-service`), simpan
+   URL + Project Access Token (scope `write_repository`) sebagai GitHub
+   Actions secrets di repo GitHub: `GITLAB_MIRROR_HOST`
+   (`gitlab.com/<namespace>/<project>.git`, tanpa `https://`) dan
+   `GITLAB_MIRROR_TOKEN`.
+2. Clone repo ini ke VPS (sementara, buat bootstrap saja), lalu jalankan
+   sekali sebagai root:
+   ```bash
+   git clone https://github.com/bagus-chalil/vision-service.git /root/bootstrap
+   cd /root/bootstrap
+   sudo ./ops/provision_vps.sh
+   ```
+   Script ini idempotent (aman dijalankan ulang) — install Python 3.11,
+   swap 4GB, user service `visionsvc`, GitLab Runner, systemd unit, dan
+   sudoers rule yang **cuma** mengizinkan runner menjalankan satu script
+   privileged (`/usr/local/bin/vision-service-deploy.sh`), tidak ada
+   command lain yang di-`sudo`-kan ke runner.
+3. Ikuti langkah manual yang di-print di akhir `provision_vps.sh`: register
+   runner (`sudo gitlab-runner register --tag-list vps-aiocr ...`) pakai
+   token dari GitLab, jalankan `ops/configure_firewall.sh <allowed-ip>`, dan
+   **cek juga firewall Proxmox di level VM** (NIC VM ini `firewall=1`) —
+   ufw saja tidak cukup kalau Proxmox-nya sendiri masih block.
+4. Deploy pertama kali manual (sebelum pipeline ada history):
+   `sudo /usr/local/bin/vision-service-deploy.sh /root/bootstrap`.
+
+Setelah itu, push ke `main` di GitHub → otomatis sampai ke VPS. Detail
+desain (kenapa 1 script privileged, kenapa smoke test jalan sebelum restart
+service, dll) ada di komentar masing-masing file `ops/*.sh`.
 
 ## Known issues / workarounds
 

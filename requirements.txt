@@ -10,6 +10,16 @@
 # the server gets exactly what was validated here, then re-verify with
 # tests/test_ocr.py before trusting it (CPU instruction sets / oneDNN
 # behavior can still differ machine to machine — see gotcha #2).
+#
+# --extra-index-url below is NOT optional on Linux: `torch.__version__` here
+# resolves to "2.14.0+cpu" (confirmed) with no CUDA runtime bundled, but on
+# Linux x86_64 a plain `pip install torch==2.14.0` from default PyPI resolves
+# to the CUDA-enabled build instead, which drags in several nvidia-*-cu12
+# packages (multiple GB combined) that are useless on a GPU-less VPS and can
+# blow a small disk (see deploy checklist - VPS pilot spec is 32GB total).
+# This index serves the CPU-only build explicitly on every platform, so pip
+# resolves the same "+cpu" variant on the VPS as tested here on Windows.
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3

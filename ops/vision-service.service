@@ -1,0 +1,30 @@
+[Unit]
+Description=Vision Service (IPC OCR pilot) - FastAPI/uvicorn
+# Don't start until network is actually up - PaddleOCR/YOLO model loading is
+# slow enough that starting before disk/network are ready just wastes the
+# first restart cycle.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=visionsvc
+Group=visionsvc
+WorkingDirectory=/opt/vision-service
+EnvironmentFile=-/opt/vision-service/.env
+ExecStart=/opt/vision-service/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+# Equivalent of ops/run_service.ps1's restart-forever loop, but managed by
+# systemd instead of a hand-rolled PowerShell supervisor.
+Restart=on-failure
+RestartSec=5
+# Model loading (PaddleOCR + YOLO) can take a while on a modest 4-core VPS;
+# give it real time before systemd decides the start failed.
+TimeoutStartSec=120
+
+# Light sandboxing - doesn't need to write anywhere except its own logs dir.
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/vision-service/logs /opt/vision-service/debug_output
+
+[Install]
+WantedBy=multi-user.target
