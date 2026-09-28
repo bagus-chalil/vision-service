@@ -45,6 +45,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `tube_emboss.html` | Frontend standalone khusus tube emboss sub-pipeline (dev/debug only, hit `/api/tube-emboss/analyze` langsung) — dipertahankan terpisah dari `index.html`, tidak wajib dipakai user akhir |
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
 | `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
+| `integrations/laravel-ipc/` | Bundle kode SISI LARAVEL (bukan Python) untuk `ipc_app` (`C:\laragon\www\new_trial_validation_app\ipc_app`, Laravel 12 + Inertia React): `files/` = mirror root `ipc_app` (semua file baru, tinggal copy), `README.md` = langkah integrasi + 3 edit manual. Di sinilah keputusan PASS/FAIL/REVIEW dibuat (`VisionEvaluator`), EXP = MFD + `master_products.shelf_life_months`, dan audit `ipc_logs`. Ditambahkan 2026-09-28, lihat status log |
 | `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
 | `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
 | `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
@@ -744,8 +745,23 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       `digit_fallback: false` per field). `pilot_ready: true`.
 - [x] Kalkulator EXP = MFD + shelf-life (bulan) client-side di `index.html`
       (2026-09-28, gotcha #18) — alat testing, API Vision Service gak berubah
-- [ ] Aturan shelf-life per SKU + cross-check EXP final di Laravel (master
-      data shelf-life per SKU, bukan input manual QC)
+- [x] Bundle integrasi Laravel (`integrations/laravel-ipc/`, 2026-09-28) —
+      `HttpVisionClient` (multipart ke `/api/analyze`), `VisionEvaluator`
+      (PASS hanya kalau status OK + format valid + cocok `ipc_batches.exp_date`;
+      apa pun lainnya REVIEW; FAIL hanya kalau confident tapi beda), EXP =
+      MFD + `master_products.shelf_life_months`, tabel audit `ipc_logs`,
+      `php artisan vision:ping`, hook React. Diverifikasi di SALINAN `ipc_app`
+      (repo asli tidak disentuh): 255 test lulus (18 baru), Pint + tsc lulus,
+      request asli ke VPS OK. Gotcha yang ketemu dari request asli: kalau
+      label_anchor gagal, response TIDAK punya key `extracted_date_code` dan
+      `raw_ocr_text` = semua teks di foto (460+ char) — jangan pakai
+      `raw_ocr_text` sebagai nilai kode kecuali `format_valid` true. Gotcha
+      verifikasi lokal: vendor `ipc_app` butuh PHP ≥ 8.4, tapi `pdo_sqlite` di
+      PHP 8.5 Laragon diblokir Application Control policy → test dijalankan
+      dengan MySQL instance sementara (datadir di scratchpad, port 3399).
+- [ ] Integrasi bundle ke `ipc_app` sungguhan (copy + 3 edit manual +
+      migrate + isi shelf-life per SKU + UI di halaman stage) — dikerjakan user
+- [ ] Input `shelf_life_months` di form/import Master Produk `ipc_app`
 - [ ] Pipeline localization khusus untuk `wo_number` dan `batch_no` — saat
       ini masih numpang di pipeline generic (whole-image OCR + regex, tanpa
       ROI/localization apa pun), jadi rawan false FORMAT_MISMATCH kalau ada
