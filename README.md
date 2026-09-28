@@ -32,12 +32,15 @@ venv/                         Python 3.11 virtualenv
 cd C:\laragon\www\vision-service
 python -m venv venv        # skip kalau venv sudah ada
 .\venv\Scripts\Activate.ps1
-pip install paddleocr paddlepaddle opencv-python fastapi uvicorn python-multipart
+pip install -r requirements.txt
 ```
 
-Versi yang sudah tested jalan di venv ini: `paddleocr==3.7.0`,
-`paddlepaddle==3.3.1`, `opencv-python==5.0.0.93`, `fastapi==0.141.1`,
-`uvicorn==0.53.0`, `python-multipart==0.0.32`.
+`requirements.txt` adalah hasil `pip freeze` dari venv yang sudah tested
+(termasuk `ultralytics` untuk YOLO tube detector, yang sebelumnya tidak
+tercatat di sini). **Pakai file ini, jangan `pip install paddleocr
+paddlepaddle ...` versi longgar** — paddleocr 3.x API-nya beda total dari
+2.x (lihat `CLAUDE.md` gotcha #1), jadi instalasi tanpa pin versi berisiko
+resolve ke versi yang tidak kompatibel di server lain.
 
 ## Menjalankan backend
 
@@ -115,6 +118,42 @@ Ada 2 config, pilih sesuai kebutuhan field-nya:
 - Teks hasil OCR **tidak pernah** di-strip/trim otomatis oleh sistem, di
   kedua config — dicocokkan apa adanya ke pattern. Kalau mismatch, itu tetap
   harus direview manusia, bukan ditebak/dipotong otomatis.
+
+## Deploy checklist (pilot ke server baru, mis. `.24`)
+
+1. `git clone` repo ini — `models/tube_detector_v1/best.pt` (YOLO tube
+   detector) sudah ikut ter-commit, jadi tidak perlu download model
+   terpisah.
+2. `pip install -r requirements.txt` di venv baru (lihat Setup di atas) —
+   jangan install versi longgar, terutama untuk `paddleocr`/`paddlepaddle`.
+3. **Sebelum** menjalankan `main.py` penuh, jalankan dulu
+   `python tests/test_ocr.py` di mesin target. Workaround oneDNN
+   (`enable_mkldnn=False`, lihat Known issues di bawah) sudah di-hardcode di
+   `main.py`, tapi CPU server bisa beda instruction set dari mesin dev ini —
+   pastikan PaddleOCR bisa load & inference dulu sebelum dianggap siap
+   pilot.
+4. Set environment variable `VISION_SERVICE_ALLOWED_ORIGINS` ke origin
+   frontend yang benar-benar dipakai (comma-separated kalau lebih dari
+   satu), sebelum start uvicorn:
+   ```powershell
+   $env:VISION_SERVICE_ALLOWED_ORIGINS = "http://100.100.160.23"
+   ```
+   Kalau env var ini tidak di-set, CORS default terbuka (`*`) dan service
+   akan print warning di log saat startup. Ini bukan pengganti auth/HTTPS
+   (belum ada, lihat Prinsip desain) — cuma mengurangi permukaan serang
+   selama pilot.
+5. Batasi akses jaringan ke port service (default 8000) hanya dari IP yang
+   memang butuh, pakai `ops\configure_firewall.ps1`:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\ops\configure_firewall.ps1 -AllowedIPs "100.100.160.23"
+   ```
+6. Jalankan service via `ops\run_service.ps1` (supervisor, auto-restart) dan
+   daftarkan sebagai Scheduled Task via `ops\register_tasks.ps1` supaya
+   survive reboot/crash tanpa perlu remote manual.
+
+Ini semua masih pilot-scope (LAN internal, field `tube_emboss_default` +
+`tube_exp_date` saja) — bukan production architecture penuh (Laravel/React/
+kontrak API final masih belum dikerjakan, lihat `CLAUDE.md`).
 
 ## Known issues / workarounds
 

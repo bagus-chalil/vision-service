@@ -15,6 +15,7 @@ Run with:  uvicorn main:app --reload --port 8000
 """
 
 import json
+import os
 import re
 import time
 import uuid
@@ -37,10 +38,28 @@ DECODE_ERROR = {"error": "Could not decode image. Unsupported or corrupt file."}
 
 app = FastAPI(title="Vision Service - OCR Test Tool")
 
-# Wide open CORS: this is a local testing tool, not production.
+# CORS origins: wide open ("*") by default, which is fine for local testing
+# (localhost frontend hitting localhost backend) but should be locked down
+# for pilot deployment on a shared server. Set the env var below to a
+# comma-separated allowlist before starting uvicorn, e.g.:
+#   $env:VISION_SERVICE_ALLOWED_ORIGINS = "http://100.100.160.23,http://127.0.0.1:5500"
+# This is a stopgap for the pilot, not the final auth story - the real
+# architecture still has no login/API key/HTTPS here (see CLAUDE.md); network
+# access should also be restricted at the firewall (see ops/configure_firewall.ps1).
+_allowed_origins_env = os.environ.get("VISION_SERVICE_ALLOWED_ORIGINS", "").strip()
+if _allowed_origins_env:
+    ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = ["*"]
+    print(
+        "WARNING: VISION_SERVICE_ALLOWED_ORIGINS not set - CORS is wide open (*). "
+        "Fine for local testing; for pilot deployment, set that env var to the "
+        "specific frontend origin(s) and restrict port access at the firewall."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
