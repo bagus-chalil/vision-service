@@ -406,6 +406,26 @@ Endpoint `main.py`:
     4 match `OK` via `label_anchor`, `zoom_retry` case Pond's/Elsheskin, dan
     digit_fallback yang legit seperti `051228`/`150728`/`200628`/`120927`).
     Tidak ada yang rusak.
+16. **Endpoint `/api/analyze` (dan `/api/ocr`, `/api/tube-emboss/analyze`)
+    `async def`, tapi manggil pipeline OCR/YOLO-nya (`run_generic_pipeline`,
+    `run_tube_emboss_pipeline`) secara LANGSUNG dan synchronous — TIDAK ADA
+    `run_in_threadpool`/`asyncio.to_thread`/`run_in_executor` di manapun di
+    codebase (2026-09-28, dicek lewat grep).** `ops/vision-service.service`
+    juga jalanin uvicorn tanpa `--workers` (1 proses). Konsekuensinya:
+    kalau 2-3 request `/api/analyze` datang bersamaan, request kedua/ketiga
+    BENAR-BENAR ANTRE — diproses satu-satu, bukan paralel, karena
+    inference yang blocking itu nahan satu-satunya event loop thread yang
+    ada. Dikonfirmasi empiris lewat `htop` di VPS: yang kelihatan kayak
+    "banyak proses" itu sebenarnya 1 proses uvicorn (1 PID) + thread-thread
+    OS internal BLAS/OpenMP milik PaddlePaddle/OpenCV yang mem-paralelkan
+    komputasi 1 request tunggal ke semua vCPU, BUKAN beberapa request
+    beda yang diproses bersamaan. Ini bukan bug — buat prototype/pilot
+    testing gak masalah — tapi jadi bottleneck nyata kalau production
+    nanti dihit banyak stasiun sekaligus. Belum diputuskan/dikerjakan
+    solusinya (opsi: multi-worker uvicorn [mahal RAM, model ke-load
+    berkali-kali], thread-pool offload [event loop bebas tapi tetap
+    CPU-core-bound], atau queue terpisah) — murni observasi, nunggu
+    keputusan eksplisit user kalau/kapan concurrency jadi kebutuhan nyata.
 
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
@@ -471,20 +491,89 @@ ke VPS" — di sini cuma gotcha yang jangan sampai di-re-discover.
    level Datacenter/VM), terpisah total dari `ufw` di dalam Ubuntu-nya
    (`ops/configure_firewall.sh`). Kalau port kelihatan "diblok" padahal
    ufw udah di-allow, cek juga rule di Proxmox UI — salah satu layer
-   block tetap bikin gagal walau layer lainnya udah benar.
+   block tetap bikin gagal walau layer lainnya udah benar. **UPDATE
+   2026-09-28**: di provisioning nyata pertama, ternyata layer Proxmox
+   TIDAK memblokir apa-apa (traffic tetap tembus walau ufw masih
+   `inactive`) — jadi 2-layer ini benar ada, tapi jangan asumsikan
+   Proxmox layer pasti restriktif; selalu test tembus/tidaknya di kedua
+   layer secara terpisah, jangan cuma asumsi dari `firewall=1` doang.
+9. **`git archive` dari Windows dengan `core.autocrlf=true` (default installer
+   Git for Windows) diam-diam convert LF→CRLF di file hasil export** —
+   walau blob git-nya sendiri LF bersih dan working tree checkout lokal
+   juga LF. Ini bikin `ops/provision_vps.sh` gagal total di VPS pertama
+   kali (`$'\r': command not found`, `set: pipefail: invalid option
+   name`) padahal file di repo/working-tree kelihatan normal. Relevan
+   kalau transfer repo ke VPS lewat `git archive`+`scp`/tar (bukan
+   `git clone` native di VPS-nya) dari mesin Windows. Fix: `git -c
+   core.autocrlf=false archive --format=tar <branch> -o out.tar` —
+   jangan pakai `git archive` polos buat keperluan ini di Windows.
+10. **`opencv-python` (paket non-headless yang dipinning di
+    `requirements.txt`) butuh `libGL.so.1` saat import**, yang gak ada
+    di Ubuntu server minimal (`ImportError: libGL.so.1: cannot open
+    shared object file`). Ini OS-level dependency, BUKAN masalah versi
+    Python package — jangan ganti `opencv-python` jadi
+    `opencv-python-headless` di `requirements.txt` (itu mengubah paket
+    yang sudah pinned/tested), cukup install lib sistemnya:
+    `apt-get install -y --no-install-recommends libgl1 libglib2.0-0`.
+    Belum ditambahkan ke `provision_vps.sh`'s apt package list — kalau
+    VPS di-rebuild dari nol, gotcha ini bakal muncul lagi sampai
+    ditambahkan ke situ.
+11. **Default CPU type Proxmox ("kvm64"/qemu64 baseline) sama sekali
+    gak punya AVX/AVX2** (`/proc/cpuinfo` flags mentok di `sse2`/`pni`)
+    — wheel CPU PaddlePaddle (kemungkinan torch juga) diasumsikan
+    minimal AVX buat kernel BLAS/oneDNN-nya, jadi begitu smoke test
+    jalan, crash `Illegal instruction (core dumped)` — BUKAN error
+    Python biasa, gampang ke-salah-diagnosis sebagai masalah dependency.
+    Fix HARUS di Proxmox, bukan di dalam VM: UI → VM 104 → Hardware →
+    Processor → **Type = "host"** (aman di setup single-node `pve1` ini,
+    gak ada concern live-migration ke CPU fisik lain), lalu **Stop+Start
+    penuh** (reboot dari dalam OS TIDAK cukup — model CPU QEMU cuma
+    ke-apply ulang kalau prosesnya di-spawn dari awal). Confirmed:
+    `/proc/cpuinfo` abis fix nunjukin CPU asli (`Intel Xeon Silver
+    4410Y`) dengan `avx`/`avx2`/`sse4_2`.
+12. **Traffic dari jaringan kantor ke subnet `100.100.160.x` (termasuk
+    VPS pilot ini) lewat overlay/VPN privat, BUKAN IP publik internet
+    biasa mesin kantor.** IP publik yang kelihatan dari layanan macam
+    `ifconfig.me` (di kasus ini `36.64.64.202`) SAMA SEKALI BUKAN IP
+    yang dilihat VPS — source IP asli yang sampai ke VPS itu
+    `10.10.162.98` (kelihatan dari `/var/log/auth.log`: `Accepted
+    publickey for ... from <ip>`, atau banner "Last login ... from"
+    di SSH client). Kalau mau nulis firewall allowlist buat IP kantor,
+    SELALU cek source IP asli lewat auth.log/`who`/`ss` di VPS-nya
+    dulu, jangan percaya IP publik dari layanan "what's my ip" buat
+    jaringan overlay kayak gini. Allowlist yang settled buat port 8000:
+    `10.10.162.0/24` (VLAN kantor) + `100.100.160.0/24` (segmen server
+    internal); SSH (22) tetap terbuka ke semua IP.
+13. **`ops/configure_firewall.sh`'s loop penghapusan rule lama (buat
+    idempotent re-run) ada bug** — kalau dijalankan ulang saat masih
+    ada rule port 8000 lama, bisa gagal di tengah jalan dengan
+    `ERROR: Invalid syntax` (nomor rule ufw geser tiap kali satu
+    rule dihapus, tapi ekstraksi nomor lewat `grep`+`sed` di loop-nya
+    gak selalu re-sync dengan benar). Workaround yang dipakai: hapus
+    manual `sudo ufw --force delete <N>` per nomor rule (mulai dari
+    nomor TERBESAR dulu supaya nomor lain gak ikut geser), baru
+    tambahkan ulang rule allow/deny-nya. Belum di-patch di script-nya
+    sendiri — kalau perlu re-run `configure_firewall.sh` lagi dengan
+    allowlist baru, cek dulu apakah bug ini masih muncul.
 
-**Status implementasi saat ini (2026-09-28)**: file-file CI/CD (`.gitlab-ci.yml`,
-`.github/workflows/mirror-to-gitlab.yml`, semua `ops/*.sh`,
-`requirements.txt` fix) sudah dibuat & di-commit, branch `production` sudah
-dibuat & di-push, secrets `GITLAB_PROJECT_URL`/`GITLAB_TOKEN` sudah di-set
-di GitHub dan mirror workflow-nya sudah confirmed jalan (user: "ok jalan
-semua"). **VPS-nya sendiri BELUM di-provision** — OS Ubuntu belum diinstall,
-`provision_vps.sh` belum pernah dijalankan, GitLab Runner belum diregister
-di VPS, firewall (ufw maupun Proxmox) belum dikonfigurasi, dan end-to-end
-deploy (push ke `production` → GitLab CI → VPS restart service) belum
-pernah dites nyata sama sekali. Lanjutan kerjaan ini ada di sesi
-berikutnya — mulai dari langkah manual yang di-print `provision_vps.sh`
-(register runner tag `vps-aiocr`) dan verifikasi firewall dual-layer.
+**Status implementasi saat ini (2026-09-28, UPDATE akhir sesi)**: VPS pilot
+(VM 104) **SUDAH fully provisioned dan live**. `provision_vps.sh` sudah
+dijalankan sukses, GitLab Runner sudah diregister (tag `vps-aiocr`, shell
+executor) dan status **Online** di GitLab UI. Sebuah pipeline yang sempat
+pending ~52 menit (dari push `production` sebelumnya, nunggu runner) auto-
+jalan begitu runner online — `deploy` job-nya sempat GAGAL di percobaan
+pertama karena 2 gotcha baru (#10 libGL dan #11 CPU AVX di atas), setelah
+di-fix manual di VPS lalu job di-retry dari GitLab UI, **end-to-end deploy
+BERHASIL** (`validate`+`deploy` sukses, `vision-service` systemd `active
+(running)`, `/api/health` respond `{"status":"ok"}`). Firewall ufw sudah
+dikonfigurasi (lihat gotcha #12): port 8000 dibatasi ke `10.10.162.0/24` +
+`100.100.160.0/24`, SSH terbuka ke semua. Testing manual via `index.html`
+lokal (arahkan field "Backend URL" ke `http://100.100.160.31:8000`)
+confirmed jalan. **Belum dikerjakan**: auth/HTTPS di API (memang belum
+dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
+5 gotcha baru di atas (#9-13) belum di-patch ke script-nya sendiri
+(`configure_firewall.sh` bug, `provision_vps.sh` belum nambah
+`libgl1`/`libglib2.0-0` ke apt list).
 
 ## Status / progress log
 
@@ -610,14 +699,21 @@ berikutnya — mulai dari langkah manual yang di-print `provision_vps.sh`
       CPU-only torch). Branch `production` dibuat & di-push, GitHub secrets
       (`GITLAB_PROJECT_URL`, `GITLAB_TOKEN`) sudah di-set, mirror workflow
       confirmed jalan.
-- [ ] Provisioning VPS pilot itu sendiri (VM 104, `pve1`) — OS Ubuntu 26.04
-      belum diinstall, `ops/provision_vps.sh` belum dijalankan, GitLab
-      Runner belum diregister (tag `vps-aiocr`), ufw + firewall Proxmox
-      level-VM belum dikonfigurasi. **Ini lanjutan eksplisit yang diminta
-      user buat sesi berikutnya.**
-- [ ] End-to-end deploy pilot (push `production` → GitLab CI → VPS restart
-      service via `ops/deploy.sh`) belum pernah dites nyata — nunggu VPS
-      selesai di-provision di atas.
+- [x] Provisioning VPS pilot itu sendiri (VM 104, `pve1`) — DONE 2026-09-28.
+      `ops/provision_vps.sh` sukses jalan, GitLab Runner terdaftar (tag
+      `vps-aiocr`, shell executor, status Online), ufw dikonfigurasi
+      (`10.10.162.0/24` + `100.100.160.0/24` → port 8000, SSH terbuka ke
+      semua). 2 gotcha baru ketemu & di-fix di proses ini (libGL + CPU
+      AVX Proxmox, lihat Infra gotcha #10-11) — sisanya (#9, #12, #13) di
+      Infra section di atas.
+- [x] End-to-end deploy pilot (push `production` → GitLab CI → VPS restart
+      service via `ops/deploy.sh`) — DONE 2026-09-28. Pipeline yang sempat
+      pending lama auto-jalan begitu runner online, `deploy` job gagal di
+      percobaan pertama (root cause: gotcha libGL + CPU AVX), setelah
+      di-fix manual lalu job di-retry dari GitLab UI dan **sukses**.
+      `vision-service` systemd `active (running)`, `/api/health` OK,
+      testing manual via `index.html` (Backend URL → `http://100.100.160.31:8000`)
+      confirmed jalan.
 
 ## Prinsip desain (jangan diubah tanpa diskusi eksplisit dengan user)
 
