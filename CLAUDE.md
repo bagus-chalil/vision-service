@@ -51,7 +51,15 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `debug_output/` | Crop debug dari `tools/*.py` dan `tests/test_tube_emboss.py` — gitignored, regenerated, jangan commit isinya |
 | `README.md` | Instruksi setup & pemakaian |
 | `.gitignore` | Exclude `venv/`, `__pycache__/`, cache PaddleX, `logs/`, `debug_output/`, dll |
-| `venv/` | Python 3.11 venv. Terinstall: `paddleocr==3.7.0`, `paddlepaddle==3.3.1`, `opencv-python==5.0.0.93`, `fastapi==0.141.1`, `uvicorn==0.53.0`, `python-multipart==0.0.32` |
+| `venv/` | Python 3.11 venv. Isi persis sama seperti `requirements.txt` (lihat itemnya sendiri) |
+| `requirements.txt` | Pinned `pip freeze` dari venv yang sudah tested (termasuk `ultralytics`/`torch`/`torchvision` yang sebelumnya cuma kesebut di README, bukan file requirements beneran). Baris pertama `--extra-index-url https://download.pytorch.org/whl/cpu` **WAJIB ada** — lihat gotcha Infra #1 |
+| `.gitlab-ci.yml` | Pipeline CI/CD (stage `validate` + `deploy`), di-gate `CI_COMMIT_BRANCH == "production"`, jalan di GitLab Runner yang tag-nya `vps-aiocr` (satu-satunya runner di project ini, terdaftar langsung di VPS target) |
+| `.github/workflows/mirror-to-gitlab.yml` | Push-mirror branch `production` doang dari GitHub ke project GitLab (`cosmaxidn/vision-service`) tiap ada push — lihat section Infra di bawah kenapa polanya begini |
+| `ops/provision_vps.sh` | Bootstrap sekali-jalan (idempotent) buat VPS pilot Linux baru — install Python 3.11, swap, user `visionsvc`, GitLab Runner, systemd unit, sudoers sempit |
+| `ops/deploy.sh` | Script privileged TUNGGAL yang boleh dijalankan GitLab Runner via sudo — sync kode, install deps, smoke test (`tests/test_ocr.py`), baru restart service. Di-install ke `/usr/local/bin/vision-service-deploy.sh` oleh `provision_vps.sh` |
+| `ops/vision-service.service` | systemd unit Linux, setara `ops/run_service.ps1` versi Windows |
+| `ops/configure_firewall.sh` | ufw allowlist per-IP untuk VPS Linux, setara `ops/configure_firewall.ps1` versi Windows |
+| `ops/run_service.ps1`, `ops/health_check.ps1`, `ops/register_tasks.ps1`, `ops/configure_firewall.ps1` | Versi Windows (dipakai di server on-prem `.24`, BUKAN untuk VPS pilot Linux — lihat item Deploy di README) |
 
 Endpoint `main.py`:
 - `POST /api/analyze` — **entrypoint utama, dipakai `index.html`.** Multipart
@@ -399,6 +407,85 @@ Endpoint `main.py`:
     digit_fallback yang legit seperti `051228`/`150728`/`200628`/`120927`).
     Tidak ada yang rusak.
 
+## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
+
+Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
+khusus buat latihan praktik DevOps ke sebuah **Proxmox VPS pilot**
+(`vision-service` di VM 104, node `pve1` — 4 vCPU / 4GB RAM / 32GB disk,
+Ubuntu 26.04, network `vmbr0` dengan Proxmox VM-level firewall AKTIF
+`firewall=1`). **GitHub tetap source of truth**; GitLab cuma dipakai buat
+CI/CD-nya. Detail lengkap ada di README.md section "Pilot via GitLab CI/CD
+ke VPS" — di sini cuma gotcha yang jangan sampai di-re-discover.
+
+1. **`torch`/`torchvision` di `requirements.txt` HARUS pakai
+   `--extra-index-url https://download.pytorch.org/whl/cpu`** (baris
+   pertama file). Konfirmasi: `torch.__version__` di venv Windows yang
+   sudah tested = `"2.14.0+cpu"` (no CUDA runtime bundled), tapi `pip show`/
+   `pip freeze` cuma nunjukin `"2.14.0"` polos — versi CPU vs CUDA-enabled
+   sama-sama diberi nomor versi yang sama, dibedakan cuma dari index
+   mana yang dipakai install. Tanpa extra-index-url ini, `pip install
+   torch==2.14.0` di Linux x86_64 (VPS-nya) resolve ke build CUDA-enabled
+   default, narik beberapa `nvidia-*-cu12` package (total bisa beberapa GB)
+   yang percuma di VPS tanpa GPU dan bisa menghabiskan disk 32GB yang
+   memang udah pas-pasan.
+2. **VPS pakai Python 3.11 dari deadsnakes PPA, BUKAN python3 default
+   Ubuntu 26.04** — `ops/provision_vps.sh` install ini eksplisit. Alasan:
+   `venv/` yang sudah divalidasi di repo ini Python 3.11 (lihat item
+   `venv/` di tabel atas); default python3 Ubuntu 26.04 kemungkinan lebih
+   baru dan belum tentu ada wheel `paddleocr`/`paddlepaddle` buat versi itu.
+3. **Branch `production` sengaja dipisah dari `main`/`v1.0.0`** — isinya
+   sama (dibuat dari situ), tapi satu-satunya fungsinya jadi pemicu
+   pipeline pilot ini. `.github/workflows/mirror-to-gitlab.yml` cuma
+   push-mirror branch ini (bukan `--all`/tags) ke GitLab, dan
+   `.gitlab-ci.yml` di-gate `CI_COMMIT_BRANCH == "production"` — push ke
+   `main`/`v1.0.0` TIDAK PERNAH trigger deploy ke VPS. Kerja harian tetap
+   di `main`/`v1.0.0`; begitu mau benar-benar di-pilot-kan, merge/push ke
+   `production`.
+4. **Push-mirror dari GitHub Actions, bukan fitur "pull mirror" bawaan
+   GitLab** — GitLab punya fitur native buat pull-mirror + auto-trigger
+   pipeline, tapi itu gated di sebagian tier berbayar. Solusinya:
+   `.github/workflows/mirror-to-gitlab.yml` di sisi GitHub yang push
+   manual ke GitLab pakai token (`GITLAB_PROJECT_URL` + `GITLAB_TOKEN`,
+   secrets sudah di-set di GitHub repo settings) — begitu GitLab nerima
+   push biasa, `.gitlab-ci.yml` standar yang trigger, gratis di tier
+   manapun.
+5. **GitLab Runner terdaftar LANGSUNG DI VPS itu sendiri** (shell
+   executor, tag **`vps-aiocr`** — harus persis, itu yang dicari
+   `.gitlab-ci.yml`), bukan runner terpisah yang SSH masuk. Konsekuensi:
+   job CI jalan sebagai user `gitlab-runner` yang dibuat otomatis oleh
+   paket resmi `gitlab-runner`.
+6. **Sudoers cuma mengizinkan SATU script privileged**
+   (`/usr/local/bin/vision-service-deploy.sh`, sumbernya `ops/deploy.sh`),
+   bukan wildcard command apapun. Alasannya: kalau CI job (misal dari MR
+   yang di-compromise) cuma bisa jalanin satu script yang isinya
+   root-controlled, permukaan serangnya jauh lebih kecil dibanding kasih
+   `gitlab-runner` sudo bebas ke `systemctl`/`rsync`/dll satu-satu.
+7. **Deploy SELALU smoke-test (`tests/test_ocr.py`) di venv yang baru
+   di-install DULU, baru restart `systemctl restart vision-service`** —
+   kalau smoke test gagal, script exit non-zero SEBELUM service yang
+   sedang jalan disentuh sama sekali. Deploy yang rusak gak pernah
+   mematikan service yang masih OK, sejalan dengan prinsip "jangan
+   nebak, flag ke manusia" yang sama dipakai di logic OCR-nya.
+8. **Firewall itu 2 LAYER independen di VM ini, bukan cuma 1** — NIC VM
+   104 dibuat dengan `firewall=1` (Proxmox punya firewall sendiri di
+   level Datacenter/VM), terpisah total dari `ufw` di dalam Ubuntu-nya
+   (`ops/configure_firewall.sh`). Kalau port kelihatan "diblok" padahal
+   ufw udah di-allow, cek juga rule di Proxmox UI — salah satu layer
+   block tetap bikin gagal walau layer lainnya udah benar.
+
+**Status implementasi saat ini (2026-09-28)**: file-file CI/CD (`.gitlab-ci.yml`,
+`.github/workflows/mirror-to-gitlab.yml`, semua `ops/*.sh`,
+`requirements.txt` fix) sudah dibuat & di-commit, branch `production` sudah
+dibuat & di-push, secrets `GITLAB_PROJECT_URL`/`GITLAB_TOKEN` sudah di-set
+di GitHub dan mirror workflow-nya sudah confirmed jalan (user: "ok jalan
+semua"). **VPS-nya sendiri BELUM di-provision** — OS Ubuntu belum diinstall,
+`provision_vps.sh` belum pernah dijalankan, GitLab Runner belum diregister
+di VPS, firewall (ufw maupun Proxmox) belum dikonfigurasi, dan end-to-end
+deploy (push ke `production` → GitLab CI → VPS restart service) belum
+pernah dites nyata sama sekali. Lanjutan kerjaan ini ada di sesi
+berikutnya — mulai dari langkah manual yang di-print `provision_vps.sh`
+(register runner tag `vps-aiocr`) dan verifikasi firewall dual-layer.
+
 ## Status / progress log
 
 - [x] venv + paddleocr/opencv/paddlepaddle terinstall & terverifikasi load
@@ -513,8 +600,24 @@ Endpoint `main.py`:
       kontrak final
 - [ ] Backend Laravel + tabel audit `ipc_logs` + logic keputusan PASS/FAIL
 - [ ] Frontend React untuk capture production
-- [ ] Push ke GitHub (repo lokal sudah di-init, belum ada commit — cek
-      `.gitignore` sudah benar sebelum commit pertama)
+- [x] Push ke GitHub — sudah dilakukan sejak beberapa commit lalu, remote
+      `origin` = `github.com/bagus-chalil/vision-service`
+- [x] CI/CD pilot infra ke VPS terpisah (2026-09-28, lihat section "Infra:
+      CI/CD pilot ke VPS" di atas untuk detail/gotcha) — `.gitlab-ci.yml`,
+      `.github/workflows/mirror-to-gitlab.yml`, `ops/provision_vps.sh`,
+      `ops/deploy.sh`, `ops/vision-service.service`,
+      `ops/configure_firewall.sh`, fix `requirements.txt` (extra-index-url
+      CPU-only torch). Branch `production` dibuat & di-push, GitHub secrets
+      (`GITLAB_PROJECT_URL`, `GITLAB_TOKEN`) sudah di-set, mirror workflow
+      confirmed jalan.
+- [ ] Provisioning VPS pilot itu sendiri (VM 104, `pve1`) — OS Ubuntu 26.04
+      belum diinstall, `ops/provision_vps.sh` belum dijalankan, GitLab
+      Runner belum diregister (tag `vps-aiocr`), ufw + firewall Proxmox
+      level-VM belum dikonfigurasi. **Ini lanjutan eksplisit yang diminta
+      user buat sesi berikutnya.**
+- [ ] End-to-end deploy pilot (push `production` → GitLab CI → VPS restart
+      service via `ops/deploy.sh`) belum pernah dites nyata — nunggu VPS
+      selesai di-provision di atas.
 
 ## Prinsip desain (jangan diubah tanpa diskusi eksplisit dengan user)
 
