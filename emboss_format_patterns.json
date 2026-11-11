@@ -15,6 +15,16 @@
     ]
   },
 
+  "tube_batch_code": {
+    "label": "Tube - Batch saja (3 huruf)",
+    "description": "Standalone emboss line carrying ONLY the 3-letter batch code (e.g. CDA), no date and no manufacture digit - seen on tube photos where the batch is on its own line (images/Media 9.jpg). Uses the default crimp-crop path (no label_anchor, nothing to anchor on). Exactly 3 letters A-Z; any other length or character -> FORMAT_MISMATCH (never stripped/corrected). Unlike tube_emboss_default's alphanumeric batch (gotcha #8), this field is letters-only per the business rule stated 2026-11-11, so a digit misread (Q->0, B->8) shows up as FORMAT_MISMATCH rather than a silent wrong batch.",
+    "blocks": [
+      { "name": "batch_1", "width": 1, "type": "charset", "pattern": "[A-Za-z]" },
+      { "name": "batch_2", "width": 1, "type": "charset", "pattern": "[A-Za-z]" },
+      { "name": "batch_3", "width": 1, "type": "charset", "pattern": "[A-Za-z]" }
+    ]
+  },
+
   "tube_exp_date": {
     "label": "Tube - EXP (belakang)",
     "description": "Expiration date embossed/printed near a literal 'EXP' label - on tube crimps, bottle caps, or printed labels (confirmed across all three from real samples 2026-09-24) - format DDMMYY only (day 01-31, month 01-12, year 00-99), e.g. EXP 051228 -> day=05 month=12 year=28. Uses label_anchor (below) instead of a fixed crop position: the pipeline OCRs the whole localized area and searches each detected text region for 'EXP' followed by exactly 6 digits, so an unrelated batch/lot code before it (e.g. 'FJZ EXP.130927') or a suffix code after it (e.g. 'EXP.150728 TU') never gets pulled into the match - only the label search boundary changed, the 6 matched digits are still never stripped/auto-corrected. Supports the reference_date cross-check flow (main.py/analyze_tube_emboss): a caller-supplied ground-truth date (e.g. QC-entered mixing date, for testing OCR read accuracy) gets compared against this OCR'd day/month/year - exact match only, never fuzzy.",

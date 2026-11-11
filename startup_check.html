@@ -78,7 +78,18 @@ async function analyze(slot, file) {
   const fd = new FormData(); fd.append('file', file); fd.append('field_type', slot.field);
   const resp = await fetch(base + '/api/analyze', { method: 'POST', body: fd });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  return resp.json();
+  const data = await resp.json();
+  // Slot batch: foto bisa berisi kode penuh (tanggal+batch+mfg) ATAU baris batch saja (3 huruf).
+  // Kalau format kode penuh tidak cocok, coba format batch-saja; dipakai hanya bila valid.
+  if (slot.id === 'bat' && data.format_valid !== true) {
+    const fd2 = new FormData(); fd2.append('file', file); fd2.append('field_type', 'tube_batch_code');
+    const r2 = await fetch(base + '/api/analyze', { method: 'POST', body: fd2 });
+    if (r2.ok) {
+      const d2 = await r2.json();
+      if (d2.format_valid === true) { d2._mode = 'batch_only'; return d2; }
+    }
+  }
+  return data;
 }
 
 function renderSlot(slot, d) {
@@ -87,7 +98,7 @@ function renderSlot(slot, d) {
   if (slot.id === 'bulk') rows.push(['no_batch', esc(d.no_batch_raw)], ['mixing_date', esc(d.mixing_date_raw)]);
   if (slot.id === 'im') rows.push(['im_number', esc(d.im_number)], ['umur simpan', d.shelf_life_value ? `${d.shelf_life_value.years ?? 0} th ${d.shelf_life_value.months ?? 0} bln` : 'tidak pasti/null']);
   if (slot.id === 'exp') rows.push(['EXP (DDMMYY)', esc(d.extracted_date_code ?? d.raw_ocr_text)], ['format_valid', esc(d.format_valid)]);
-  if (slot.id === 'bat') rows.push(['kode', esc(d.raw_ocr_text)], ['batch_code', esc(d.batch_code)], ['3 huruf?', esc(d.batch_code_letters_ok)]);
+  if (slot.id === 'bat') rows.push(['jenis foto', d._mode === 'batch_only' ? 'batch saja' : 'kode penuh'], ['kode', esc(d.raw_ocr_text)], ['batch_code', esc(d.batch_code)], ['3 huruf?', esc(d.batch_code_letters_ok)]);
   if (d.error || d.error_reason) rows.push(['error', esc(d.error || d.error_reason)]);
   rows.push(['waktu', esc(((d.processing_time_ms ?? 0) / 1000).toFixed(1)) + ' dtk']);
   el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';

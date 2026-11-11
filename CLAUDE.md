@@ -570,6 +570,37 @@ Endpoint `main.py`:
       SELECT saja!) memang Label Bulk (449 foto); `startup/im_number` (553).
       Foto IM contoh (`im_number/2439.jpg`) hanya memperlihatkan judul IM
       tanpa pernyataan umur simpan → RISIKO tahap 2, cek lebih banyak sampel.
+    - **Update 2026-11-11 (sesi 3) — halaman uji gabungan + tube batch:**
+      `GET /startup-check` (`startup_check.html`): 4 slot foto (Label Bulk,
+      IM, tube EXP, tube batch) + input manual EXP/batch untuk non-tube;
+      EXP diharapkan = mixing date + umur simpan (hari sama + N bulan, hari
+      yang tak ada → REVIEW, tanpa roll-over) dan batch diharapkan = tepat 3
+      huruf setelah "/" pada No Batch, KEDUANYA dihitung di browser (alat
+      testing, bukan keputusan; PASS/FAIL tetap di ipc_app). Dropdown
+      `index.html` disederhanakan (label pendek, `generic` = "Umum").
+      Tube bolak-balik: depan = kode 10-char (tanggal+batch+mfg), belakang =
+      EXP; non-tube memakai foto coding (belum ada field_type).
+      `tube_emboss_pipeline.py` menambah `batch_code` (potongan blok `batch_*`,
+      hanya bila `format_valid`) dan `batch_code_letters_ok` (flag: tepat 3
+      huruf; aturan user — blok validasi tetap alfanumerik, gotcha #8).
+      Salah baca Q→0 / B→8 pada emboss tertangkap flag huruf ini, tidak
+      pernah dikoreksi otomatis.
+    - **Tahap 6 `tube_batch_code` DIKERJAKAN (2026-11-11):** entry baru di
+      `emboss_format_patterns.json`, TANPA `label_anchor` (jalur default
+      crimp-crop), 3 blok `batch_1..3` charset `[A-Za-z]` → untuk foto yang
+      barisnya HANYA batch (mis. `images/Media 9.jpg` = "CDA", conf 0.98).
+      `startup_check.html` slot batch mencoba `tube_emboss_default` dulu; bila
+      `format_valid` bukan true, coba `tube_batch_code` dan pakai hanya bila
+      valid. Regression 38 foto `images/`: hanya Media 9 lolos; foto kode
+      penuh/EXP tetap FORMAT_MISMATCH (tak ada batch palsu). 5 foto WhatsApp
+      → `ERROR` (YOLO tak deteksi tube), belum diselidiki.
+    - **Keputusan terbuka:** buang view 640 px untuk label_bulk? (what-if 25/35
+      OK, 0 false OK, belum diterapkan); user perlu cek 2 item `_verify`
+      (3435, 5844) di `label_bulk_truth_v2.json`. Server harus di-restart
+      setelah ubah kode Python (`llm_extract.py`/`main.py`); HTML/JSON config
+      tidak perlu.
+    - `tools/eval_data/` (belum di-gitignore) berisi kunci jawaban turunan foto
+      produksi — periksa sebelum commit apa pun.
     - `models/vision-ai-ocr.ipynb` (notebook Kaggle latih YOLO tube) berisi
       API key Roboflow plaintext, belum pernah di-commit → jangan di-commit
       sebelum key dihapus/di-rotate.
@@ -845,12 +876,14 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
 - [x] Startup AI Cross-Check tahap 1 sebagian (2026-11-11, lihat gotcha #19):
       `llm_extract.py` + `tools/evaluate_label_bulk.py` + konsensus
       multi-ukuran, terukur di 14 foto.
-- [ ] Startup AI Cross-Check: daftarkan `label_bulk` di `main.py` (`/api/analyze`
-      + `/api/field-types`), perluas set uji produksi ke ±30 foto + kunci
-      jawaban, evaluasi 4 foto LOW_CONFIDENCE yang belum jelas, tahap 2
-      `im_document` (periksa dulu foto `startup/im_number` apakah memuat umur
-      simpan), tahap 6 `tube_batch_code`, daftar field_type baru di
-      `ipc_app/config/vision.php`
+- [x] Startup AI Cross-Check tahap 1, 2, 6 selesai di repo ini (2026-11-11,
+      gotcha #19): `label_bulk` + `im_document` terdaftar di `main.py`
+      (35 foto masing-masing, 0 false OK; label_bulk 17 OK, IM 10 OK),
+      `tube_batch_code`, halaman `/startup-check`. Belum di-commit.
+- [ ] Startup AI Cross-Check sisa: putuskan view 640 px, user cek 2 item
+      `_verify`, selidiki 5 foto WhatsApp ERROR, kunci jawaban IM lebih
+      banyak, daftar field_type baru di `ipc_app/config/vision.php`
+      (tahap 3–5 di ipc_app)
 - [ ] Integrasi bundle ke `ipc_app` sungguhan (copy + 3 edit manual +
       migrate + isi shelf-life per SKU + UI di halaman stage) — dikerjakan user
 - [ ] Input `shelf_life_months` di form/import Master Produk `ipc_app`
