@@ -939,6 +939,35 @@ def extract_date_blocks(text: str, format_cfg: dict) -> dict:
     return found
 
 
+def extract_batch_code(text, format_cfg: dict, format_valid):
+    """Slices the batch substring (blocks named batch_*) out of the OCR text by
+    the field_type's own block widths, EXACTLY as read - never stripped or
+    corrected. Only returned when the whole code passed block validation
+    (otherwise the slice positions aren't trustworthy) and the field_type
+    actually defines batch blocks; else None. Just a substring of raw_ocr_text -
+    no decision or arithmetic here."""
+    if format_valid is not True or not text:
+        return None
+    pos, parts = 0, []
+    for block in format_cfg.get("blocks") or []:
+        width = block["width"]
+        if block["name"].startswith("batch"):
+            parts.append(text[pos:pos + width])
+        pos += width
+    return "".join(parts) or None
+
+
+def batch_code_letters_ok(batch_code):
+    """FLAG ONLY (never edits batch_code): True iff the batch is exactly 3
+    letters, the business rule stated by the user (2026-11-11). The block
+    validation itself stays alphanumeric (gotcha #8: PPIC confirmed e.g. AL1
+    exists), so a non-letter batch is still FORMAT_OK there - this flag lets
+    the caller (ipc_app) route it to REVIEW. None when there is no batch_code."""
+    if batch_code is None:
+        return None
+    return re.fullmatch(r"[A-Za-z]{3}", batch_code) is not None
+
+
 def check_reference_date(raw_text, format_cfg: dict, format_valid, reference_date) -> dict:
     """Cross-checks the OCR'd day/month/year against a caller-supplied
     ground-truth date (e.g. QC-entered mixing date) - for testing whether
@@ -1140,6 +1169,8 @@ def analyze_label_anchor_field(
         "validation": validation,
         "tube_detection_confidence": tube_detection_confidence,
         "date_check": check_reference_date(extracted_digits, format_cfg, format_valid, reference_date),
+        "batch_code": extract_batch_code(extracted_digits, format_cfg, format_valid),
+        "batch_code_letters_ok": batch_code_letters_ok(extract_batch_code(extracted_digits, format_cfg, format_valid)),
     }
 
     if debug:
@@ -1292,6 +1323,8 @@ def analyze_tube_emboss(
         "validation": validation,
         "tube_detection_confidence": localization["confidence"],
         "date_check": check_reference_date(raw_text, format_cfg, format_valid, reference_date),
+        "batch_code": extract_batch_code(raw_text, format_cfg, format_valid),
+        "batch_code_letters_ok": batch_code_letters_ok(extract_batch_code(raw_text, format_cfg, format_valid)),
     }
 
     if debug:

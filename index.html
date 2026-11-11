@@ -175,10 +175,18 @@ let fieldTypesByKey = {};
 let allFieldTypes = [];
 
 // --- Load field types from backend (merges field_patterns.json + emboss_format_patterns.json, each tagged with its pipeline) ---
+if (location.protocol.startsWith('http')) backendUrlInput.value = location.origin; // disajikan server -> pakai server itu
+else { try { const saved = localStorage.getItem('backendUrl'); if (saved) backendUrlInput.value = saved; } catch (e) {} }
+backendUrlInput.addEventListener('change', () => {
+  try { localStorage.setItem('backendUrl', backendUrlInput.value.trim()); } catch (e) {}
+  fieldTypeSelect.innerHTML = '<option value="">Loading...</option>';
+  loadFieldTypes();
+});
+
 async function loadFieldTypes() {
   try {
-    const base = backendUrlInput.value.replace(/\/+$/, '');
-    const resp = await fetch(base + '/api/field-types');
+    const base = backendUrlInput.value.trim().replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/field-types', { signal: AbortSignal.timeout(8000) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     allFieldTypes = await resp.json();
     renderFieldTypeOptions();
@@ -418,6 +426,8 @@ function badgeHtml(value) {
 function renderResults(data) {
   if (data.pipeline === 'tube_emboss') {
     renderTubeEmbossResult(data);
+  } else if (data.pipeline === 'llm') {
+    renderLlmResult(data);
   } else {
     renderGenericResult(data);
   }
@@ -460,6 +470,48 @@ function renderGenericResult(data) {
   }
 
   drawBoxes(data.detections);
+}
+
+// LLM document pipeline (label_bulk dst): nilai persis seperti terbaca model,
+// tidak pernah di-strip/dikoreksi; format_ok/view_agreement cuma flag.
+function renderLlmResult(data) {
+  resultMeta.textContent = `field_type: ${data.field_type} - engine: ${data.engine_used ?? 'n/a'} (${escapeHtml(data.model ?? '')}) - ${data.processing_time_ms} ms`;
+  const val = v => (v === null || v === undefined) ? '<span class="field-desc">null</span>' : `<b>${escapeHtml(v)}</b>`;
+  const flags = o => o ? Object.entries(o).map(([k, v]) => `${k}: ${v}`).join(', ') : 'n/a';
+  const rows = [['status', badgeHtml(data.status)]];
+  if (data.error) {
+    rows.push(['error', `<b style="color:#b91c1c">${escapeHtml(data.error)}</b>`]);
+  } else {
+    if (data.field_type === 'im_document') {
+      rows.push(['im_number', val(data.im_number)]);
+      const sl = data.shelf_life || [];
+      rows.push(['shelf_life', sl.length
+        ? sl.map(e => `<b>${escapeHtml(e.packaging)}</b>: ${escapeHtml(e.raw_text)} &rarr; tahun=${e.years ?? 'null'}, bulan=${e.months ?? 'null'}`).join('<br>')
+        : '<span class="field-desc">tidak terbaca (kosong)</span>']);
+    } else {
+      rows.push(
+        ['no_batch_raw', val(data.no_batch_raw)],
+        ['mixing_date_raw', val(data.mixing_date_raw)],
+        ['kode_bulk', val(data.kode_bulk)],
+      );
+    }
+    rows.push(
+      ['confidence (kasar, bukan probabilitas)', `${(data.confidence * 100).toFixed(0)}%`],
+      ['legible', escapeHtml(flags(data.legible))],
+      ['format_ok', escapeHtml(flags(data.format_ok))],
+      ['view_agreement', escapeHtml(flags(data.view_agreement))],
+    );
+    if (data.views_read) {
+      rows.push(['views_read', data.views_read.map((v, i) => `#${i + 1}: ${escapeHtml(JSON.stringify(v))}`).join('<br>')]);
+    }
+  }
+  singleResultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  singleResultTable.classList.remove('hidden');
+  resultTable.classList.add('hidden');
+  mismatchNote.classList.add('hidden');
+  roiNotes.classList.add('hidden');
+  const ctx = boxCanvas.getContext('2d');
+  ctx.clearRect(0, 0, boxCanvas.width, boxCanvas.height);
 }
 
 function renderTubeEmbossResult(data) {

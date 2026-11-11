@@ -46,6 +46,9 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
 | `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
 | `integrations/laravel-ipc/` | Bundle kode SISI LARAVEL (bukan Python) untuk `ipc_app` (`C:\laragon\www\new_trial_validation_app\ipc_app`, Laravel 12 + Inertia React): `files/` = mirror root `ipc_app` (semua file baru, tinggal copy), `README.md` = langkah integrasi + 3 edit manual. Di sinilah keputusan PASS/FAIL/REVIEW dibuat (`VisionEvaluator`), EXP = MFD + `master_products.shelf_life_months`, dan audit `ipc_logs`. Ditambahkan 2026-09-28, lihat status log |
+| `llm_extract.py` | Ekstraksi via LLM (Ollama, vision) untuk field_type dokumen: `analyze_label_bulk()` (tahap 1 Startup AI Cross-Check; `im_document` menyusul). Plain import sibling `main.py`. Belum didaftarkan di `main.py`/`/api/analyze`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`, dst) — lihat gotcha #19 |
+| `tools/evaluate_label_bulk.py` | Evaluasi akurasi per field + kecepatan `label_bulk` vs kunci jawaban (`tools/eval_data/label_bulk_truth.json`, `--truth` untuk file lain). Membedakan WRONG_CONFIDENT (lolos gerbang tapi salah = berbahaya) dari salah-tapi-ter-flag |
+| `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json` |
 | `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
 | `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
 | `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
@@ -491,6 +494,83 @@ Endpoint `main.py`:
     tanpa digit_fallback field ini cuma bisa match dari literal "MFD", dan
     hasilnya sejauh ini selalu `LOW_CONFIDENCE` (masuk review manusia).
 
+19. **Startup AI Cross-Check — tahap 1 `label_bulk` (2026-11-11, belum di-wire ke `/api/analyze`).**
+    Rencana lengkap: `docs/startup-ai-crosscheck-plan.md` (vision-service
+    mengerjakan tahap 0,1,2,6; ipc_app tahap 3,4,5). Keputusan & temuan:
+    - **LLM = Ollama di server LLM kantor (`100.100.160.26`, GPU), model
+      `qwen3.8:27b`** (bukan `cosmax-image-prompt`, bukan `gpt-oss:20b`).
+      Ollama hanya listen `127.0.0.1:11434` di server itu → dari laptop lewat
+      terowongan `ssh -N -o ServerAliveInterval=30 -L 11434:127.0.0.1:11434
+      devopscosmax@100.100.160.26` (sempat putus sendiri: `Connection reset`;
+      tidak auto-reconnect). **User tegas: semua inferensi berat HARUS di
+      server Ollama (GPU); jangan jalankan OCR/PaddleOCR di laptop atau
+      server aplikasi (tanpa GPU, 11-29 dtk/foto).** Tidak perlu training
+      model baru. Per request wajib override default model: `temperature 0`,
+      `seed 0`, `think:false`, `format` = JSON schema (sudah di kode).
+    - **Prompt saja TIDAK cukup mencegah halusinasi.** Di foto produksi
+      (480x640, glare/terpotong; mis. `date_bulk/1033.jpg`) model MENEBAK
+      karakter yang tertutup dan tetap `legible=true`; memperkuat prompt
+      ("tertutup = null") malah bikin tebakan lolos cek format. Temuan
+      kunci: tebakan itu BERUBAH-ubah menurut ukuran gambar input, sedangkan
+      bacaan benar stabil di semua ukuran (kecuali 480 yang terlalu kecil).
+      Mitigasi yang dipakai: **konsensus multi-ukuran** (`LABEL_VIEW_SIDES`,
+      default `1024,640,1600,2048`, up- dan down-scale) — nilai `OK` hanya
+      kalau SEMUA view identik + format valid + legible. Respons memuat
+      `view_agreement`, `views_read`. Confidence BUKAN probabilitas
+      terkalibrasi (turunan legible+format+agreement).
+    - **Kontrak** `label_bulk`: `no_batch_raw`, `mixing_date_raw`,
+      `kode_bulk`, `legible{}`, `format_ok{}`, `view_agreement{}`,
+      `confidence`, `status` (OK/LOW_CONFIDENCE/ERROR). Nilai persis seperti
+      terbaca, tidak pernah strip/koreksi; format cek = flag saja. LLM mati =
+      `ERROR`, bukan PASS. Satu retry bila JSON rusak. Label Bulk: abaikan
+      "Exp. Date" tulisan tangan & stiker timestamp putih.
+    - **Hasil ukur (14 foto, kecil!)**: 3 sampel `images/sources/` + 11
+      produksi `date_bulk`. 8 foto `OK` semuanya terverifikasi benar manual;
+      0 nilai salah lolos gerbang. Foto glare berat → `LOW_CONFIDENCE`; 4
+      foto lain juga `LOW_CONFIDENCE` karena view tak sepakat (belum dicek
+      apakah memang tak terbaca atau terlalu ketat). Kecepatan ~3,5 dtk
+      (foto glare) – ~7,5 dtk (foto konsisten) per foto, jauh di bawah
+      asumsi 25-30 dtk. Belum cukup data utk klaim "nol false PASS".
+    - **Update 2026-11-11 (sesi 2)**: `label_bulk` + `im_document` SUDAH
+      terdaftar di `main.py` (`LLM_FIELD_TYPES`, pipeline `"llm"`, dijalankan
+      lewat `run_in_threadpool`; jalur OCR lama tetap sync, gotcha #16).
+      `index.html` dilayani dari server (`GET /`) → buka `http://localhost:8000/`,
+      jangan `file://`. **Ukur label_bulk, 35 foto produksi** (kunci:
+      `testdata_private/label_bulk_truth_v2.json`, dibaca Claude, 2 item
+      `_verify` perlu cek manusia): 17 OK / 18 LOW; **0 false OK** (11 OK baru
+      + sebelumnya semuanya cocok foto); mixing_date 100% benar, no_batch 86%
+      (5 salah semuanya ter-flag), kode_bulk 94%; ~7,5 dtk/foto. Penyebab LOW:
+      umumnya HANYA view 640 px yang menyimpang (3 view lain sepakat) → what-if
+      tanpa view 640: 25/35 OK, tetap 0 false OK (SIMULASI dari `views_read`,
+      belum jadi default; n kecil). 4 foto LOW lama (2841/4257/4832/7302):
+      bukan gerbang terlalu ketat — ada view yang benar-benar salah baca
+      (mis. 16/10 dibaca 18/10); 7302 memang buram. **`im_document`** (10 foto
+      IM): 3 OK (1810, 5081, 7265, semua cocok foto), 7 LOW wajar (bukan IM /
+      judul saja / terpotong / buram). **Diperluas ke 29 foto IM** (19 acak
+      baru): total 6 OK (+3409, 4351, 683, semua cocok foto), 23 LOW, 0 false
+      OK; ~6-9 dtk/foto. Laju OK rendah (±21%) karena foto 480x640 membuat
+      teks umur simpan sangat kecil/buram → hambatan utamanya KUALITAS
+      FOTO (keputusan terbuka rencana #4: panduan zoom ke bagian umur
+      simpan), bukan gerbangnya. Kunci jawaban + skrip: `testdata_private/im_truth.json`
+      (8 foto, bias: 6 dipilih karena sudah OK) + `tools/evaluate_im_document.py`.
+      **Keputusan user 2026-11-11:** konsensus umur simpan dinilai dari NILAI
+      (tahun/bulan) saja, bukan label/kelengkapan Botol-Unit Box: dipercaya bila
+      semua view memberi himpunan nilai identik dan TEPAT SATU nilai; respons
+      menambah `shelf_life_value` ({years, months} apa adanya). Re-run 35 foto
+      IM: 7 OK, 0 false OK (tidak mengubah laju OK; penghambat sebenarnya
+      adalah 1 view yang mengembalikan list kosong). What-if (belum diterapkan,
+      tunggu keputusan): view kosong = abstain, wajib >=3 view terbaca & tak ada
+      yang bertentangan → +4 OK (2109, 4360, 6554, 6569). Skema memakai `years`/`months`
+      nullable (bukan `value`+`unit`) karena ada "1 Tahun 6 bulan"; tidak ada
+      konversi ke bulan di sini. Umur simpan TIDAK selalu ada di foto IM.
+    - **Data**: `filling/date_bulk` di `ipc_attachments` (DB `ipc_system`,
+      SELECT saja!) memang Label Bulk (449 foto); `startup/im_number` (553).
+      Foto IM contoh (`im_number/2439.jpg`) hanya memperlihatkan judul IM
+      tanpa pernyataan umur simpan → RISIKO tahap 2, cek lebih banyak sampel.
+    - `models/vision-ai-ocr.ipynb` (notebook Kaggle latih YOLO tube) berisi
+      API key Roboflow plaintext, belum pernah di-commit → jangan di-commit
+      sebelum key dihapus/di-rotate.
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -759,6 +839,15 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       verifikasi lokal: vendor `ipc_app` butuh PHP ≥ 8.4, tapi `pdo_sqlite` di
       PHP 8.5 Laragon diblokir Application Control policy → test dijalankan
       dengan MySQL instance sementara (datadir di scratchpad, port 3399).
+- [x] Startup AI Cross-Check tahap 1 sebagian (2026-11-11, lihat gotcha #19):
+      `llm_extract.py` + `tools/evaluate_label_bulk.py` + konsensus
+      multi-ukuran, terukur di 14 foto.
+- [ ] Startup AI Cross-Check: daftarkan `label_bulk` di `main.py` (`/api/analyze`
+      + `/api/field-types`), perluas set uji produksi ke ±30 foto + kunci
+      jawaban, evaluasi 4 foto LOW_CONFIDENCE yang belum jelas, tahap 2
+      `im_document` (periksa dulu foto `startup/im_number` apakah memuat umur
+      simpan), tahap 6 `tube_batch_code`, daftar field_type baru di
+      `ipc_app/config/vision.php`
 - [ ] Integrasi bundle ke `ipc_app` sungguhan (copy + 3 edit manual +
       migrate + isi shelf-life per SKU + UI di halaman stage) — dikerjakan user
 - [ ] Input `shelf_life_months` di form/import Master Produk `ipc_app`

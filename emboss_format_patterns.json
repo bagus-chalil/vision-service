@@ -2,7 +2,7 @@
   "_comment": "Tube emboss code format config, keyed by field_type (add one entry per SKU if formats diverge later). 'blocks' is an ordered list of fixed-width chunks: type 'int_range' checks the chunk is all digits AND numerically within [min,max] (e.g. day 1-31, not just 'first digit is 0-3' - that wrongly let '39' or '00' through); type 'charset' checks each character in the chunk against a regex class. expected_length is the sum of block widths. No auto-strip/auto-fix is ever applied to OCR text - a length mismatch or any block failing its check always flags FORMAT_MISMATCH, regardless of confidence. Optional 'label_anchor' (e.g. \"EXP\") switches the field_type to the anchor-search path in tube_emboss_pipeline.py instead of the default fixed-crop-position path: the code is located by searching for that literal label inside the OCR'd text (still never editing the matched digits) rather than assumed to start at position 0 of a percentage-based crop - use this for any code whose surrounding text/position on the package isn't fixed (see tube_exp_date). Fields without 'label_anchor' (tube_emboss_default) keep the original crimp-crop behavior.",
 
   "tube_emboss_default": {
-    "label": "Tube Emboss Code (DDMMYY + 3-char alphanumeric batch + 1-digit manufacture code)",
+    "label": "Tube - Kode depan (tanggal + batch)",
     "description": "DDMMYY date (day 01-31, month 01-12, year 00-99) + 3-char batch code (from PPIC batch number table, confirmed can mix letters and digits e.g. AL1/AL2, not letters-only) + 1-digit Cosmax manufacture code, e.g. 310826ALZ8 -> day=31 month=08 year=26 batch=ALZ mfg=8",
     "blocks": [
       { "name": "day",         "width": 2, "type": "int_range", "min": 1, "max": 31 },
@@ -16,7 +16,7 @@
   },
 
   "tube_exp_date": {
-    "label": "Tube Emboss EXP Date (DDMMYY only)",
+    "label": "Tube - EXP (belakang)",
     "description": "Expiration date embossed/printed near a literal 'EXP' label - on tube crimps, bottle caps, or printed labels (confirmed across all three from real samples 2026-09-24) - format DDMMYY only (day 01-31, month 01-12, year 00-99), e.g. EXP 051228 -> day=05 month=12 year=28. Uses label_anchor (below) instead of a fixed crop position: the pipeline OCRs the whole localized area and searches each detected text region for 'EXP' followed by exactly 6 digits, so an unrelated batch/lot code before it (e.g. 'FJZ EXP.130927') or a suffix code after it (e.g. 'EXP.150728 TU') never gets pulled into the match - only the label search boundary changed, the 6 matched digits are still never stripped/auto-corrected. Supports the reference_date cross-check flow (main.py/analyze_tube_emboss): a caller-supplied ground-truth date (e.g. QC-entered mixing date, for testing OCR read accuracy) gets compared against this OCR'd day/month/year - exact match only, never fuzzy.",
     "label_anchor": "EXP",
     "blocks": [
@@ -27,7 +27,7 @@
   },
 
   "tube_mfd_date": {
-    "label": "Tube MFD Date (DDMMYY, printed near 'MFD' label)",
+    "label": "Tube - MFD (cetak di body)",
     "description": "Manufacture date PRINTED (not embossed) near a literal 'MFD' label, typically on the tube body rather than the crimp (confirmed 2026-09-28 from a real Pond's UV Protect sample: 'MFD 140624 8 QFZ' printed on the body, while the crimp only carries a separate embossed EXP-only code) - format DDMMYY only (day 01-31, month 01-12, year 00-99), e.g. MFD 140624 -> day=14 month=06 year=24. Added as a more reliable companion to tube_exp_date: printed body text has much higher contrast than gold-foil crimp emboss, which is prone to glare/knurl noise (see tube_emboss_pipeline.py gotchas) and to physical occlusion (e.g. a QC clip covering part of the crimp). Reuses the same label_anchor path as tube_exp_date (label_anchor + zoom_retry), but with 'digit_fallback': false - an unlabeled 6-digit date can't be told apart from an EXP date (a 2026-09-28 regression over images/ returned EXP dates as MFD on 7 photos with fallback on), so without a literal 'MFD' this field reports LABEL_NOT_FOUND rather than guessing. Vision Service still only reports this OCR'd value as-is; it does NOT compute or cross-check an expected EXP date from it (e.g. MFD + shelf-life) - shelf-life duration is SKU-specific business logic and stays out of Vision Service per this project's settled architecture (see CLAUDE.md 'Prinsip desain'). 'exp_from_shelf_life': true only tells the test frontend (index.html) to offer a client-side EXP = MFD + N months calculator with a QC-entered shelf-life; the API response is unchanged.",
     "label_anchor": "MFD",
     "digit_fallback": false,

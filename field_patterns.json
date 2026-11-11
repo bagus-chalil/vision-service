@@ -1,6 +1,6 @@
 {
   "generic": {
-    "label": "Generic / no format check",
+    "label": "Umum (tanpa cek format)",
     "description": "No expected pattern - only confidence score applies.",
     "pattern": null,
     "expected_length": null,

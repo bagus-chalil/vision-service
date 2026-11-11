@@ -24,9 +24,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from paddleocr import PaddleOCR
 
+import llm_extract
 import tube_emboss_pipeline
 
 FIELD_PATTERNS_PATH = Path(__file__).parent / "field_patterns.json"
@@ -132,6 +135,21 @@ def combine_status(confidence, validation_status):
     return "OK"
 
 
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def serve_index():
+    """Sajikan index.html dari server yang sama (testing lokal): Backend URL
+    otomatis = origin halaman, tanpa soal CORS/file://."""
+    return FileResponse(Path(__file__).parent / "index.html")
+
+
+@app.get("/startup-check", include_in_schema=False)
+def serve_startup_check():
+    """Halaman uji gabungan Startup Check (alat testing; hitung EXP/batch
+    diharapkan di browser, keputusan resmi tetap di ipc_app)."""
+    return FileResponse(Path(__file__).parent / "startup_check.html")
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -212,6 +230,32 @@ def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref, re
     return result
 
 
+LLM_FIELD_TYPES = {
+    "label_bulk": {
+        "label": "Label Bulk",
+        "description": "No Batch + Mixing Date + Kode Bulk dibaca LLM (Ollama GPU), konsensus multi-ukuran",
+        "fn": llm_extract.analyze_label_bulk,
+    },
+    "im_document": {
+        "label": "IM - Umur Simpan",
+        "description": "Nomor IM + umur simpan per kemasan (teks asli, tahun/bulan apa adanya) dibaca LLM (Ollama GPU)",
+        "fn": llm_extract.analyze_im_document,
+    },
+}
+
+
+def run_llm_pipeline(image, field_type, request_id):
+    """Document field_types read by the Ollama vision LLM (no PaddleOCR).
+    Returns raw values + legibility + status only - never PASS/FAIL."""
+    start = time.time()
+    result = LLM_FIELD_TYPES[field_type]["fn"](image)
+    result["field_type"] = field_type
+    result["request_id"] = request_id
+    result["pipeline"] = "llm"
+    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    return result
+
+
 @app.get("/api/field-types")
 def field_types():
     """Unified field_type catalog for the frontend dropdown (index.html) -
@@ -243,6 +287,17 @@ def field_types():
                 "exp_from_shelf_life": cfg.get("exp_from_shelf_life", False),
             }
         )
+    for key, cfg in LLM_FIELD_TYPES.items():
+        merged.append(
+            {
+                "key": key,
+                "label": cfg["label"],
+                "description": cfg["description"],
+                "expected_length": None,
+                "pipeline": "llm",
+                "pilot_ready": True,
+            }
+        )
     return merged
 
 
@@ -271,6 +326,12 @@ async def analyze(
 
     if image is None:
         return DECODE_ERROR
+
+    if field_type in LLM_FIELD_TYPES:
+        # LLM jalur (Ollama GPU). Panggilan HTTP-nya blocking dan lama (beberapa
+        # detik), jadi dilempar ke threadpool supaya event loop tidak tertahan
+        # (lihat gotcha #16 - jalur OCR lama sengaja tidak diubah).
+        return await run_in_threadpool(run_llm_pipeline, image, field_type, request_id or str(uuid.uuid4()))
 
     is_tube_emboss = bool(field_type) and field_type in tube_emboss_pipeline.load_emboss_format_patterns()
     if is_tube_emboss:

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Startup Check - Uji Gabungan</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #f3f4f6; color: #111827; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: #4b5563; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; }
+  .row { margin: 6px 0; font-size: 13px; }
+  .hint { font-size: 11px; color: #6b7280; }
+  button { padding: 7px 12px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text] { padding: 6px; border: 1px solid #d1d5db; border-radius: 6px; width: 140px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td { padding: 5px 6px; border-top: 1px solid #f0f0f0; vertical-align: top; }
+  td:first-child { color: #4b5563; width: 42%; }
+  .b { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .ok { background: #dcfce7; color: #166534; } .warn { background: #fef3c7; color: #92400e; } .bad { background: #fee2e2; color: #991b1b; } .na { background: #e5e7eb; color: #374151; }
+  img.pv { max-width: 100%; max-height: 140px; margin-top: 6px; border-radius: 4px; }
+  .note { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px; font-size: 12px; margin: 12px 0; }
+</style>
+</head>
+<body>
+<h1>Startup Check - Uji Gabungan (alat testing)</h1>
+<div class="sub">Foto Label Bulk + IM + tube (atau ketik manual untuk non-tube) &rarr; EXP &amp; batch diharapkan dihitung <b>di browser ini</b>, lalu dibandingkan. Vision Service hanya membaca; <b>keputusan PASS/FAIL sebenarnya di ipc_app</b>. Hasil di bawah hanya indikasi untuk uji.</div>
+
+<div class="grid" id="slots"></div>
+
+<div class="card" style="margin-top:12px">
+  <h2>Pembanding non-tube / manual (opsional, menggantikan foto tube)</h2>
+  <div class="row">EXP terbaca (DDMMYY): <input type="text" id="manExp" placeholder="mis. 080928" maxlength="6">
+    &nbsp; Batch: <input type="text" id="manBatch" placeholder="mis. MJB" maxlength="3"></div>
+  <div class="hint">Kalau diisi dan foto tube kosong, nilai ini yang dibandingkan.</div>
+</div>
+
+<div style="margin:12px 0"><button class="primary" id="runAll">Jalankan semua foto yang sudah dipilih</button>
+  <span id="runMsg" class="hint"></span></div>
+
+<div class="card"><h2>Hasil gabungan</h2><div id="summary" class="hint">Belum dijalankan.</div></div>
+
+<div class="note">Aturan hitung (dari rencana): EXP = hari yang sama + N bulan (tahun &times; 12 + bulan, kalender sungguhan). Hari yang tidak ada di bulan tujuan (mis. 29 Feb) &rarr; <b>PERLU REVIEW</b>, tidak di-roll-over. Batch diharapkan = tepat 3 huruf setelah "/" pada No Batch. Status selain OK dari pembacaan foto &rarr; PERLU REVIEW.</div>
+
+<script>
+const base = location.protocol.startsWith('http') ? location.origin : 'http://localhost:8000';
+const SLOTS = [
+  { id: 'bulk', title: '1. Label Bulk', field: 'label_bulk' },
+  { id: 'im',   title: '2. IM (umur simpan)', field: 'im_document' },
+  { id: 'exp',  title: '3. Tube - sisi EXP', field: 'tube_exp_date' },
+  { id: 'bat',  title: '4. Tube - sisi batch (kode depan)', field: 'tube_emboss_default' },
+];
+const results = {};
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const badge = (t, c) => `<span class="b ${c}">${esc(t)}</span>`;
+const stBadge = s => badge(s, s === 'OK' ? 'ok' : s === 'ERROR' ? 'bad' : 'warn');
+
+const slotsEl = document.getElementById('slots');
+SLOTS.forEach(s => {
+  const d = document.createElement('div'); d.className = 'card';
+  d.innerHTML = `<h2>${s.title}</h2>
+    <input type="file" accept="image/*" id="f_${s.id}">
+    <div class="hint">Pilih file / di tablet: ambil foto langsung.</div>
+    <img class="pv" id="pv_${s.id}" hidden>
+    <div id="r_${s.id}" class="row hint">-</div>`;
+  slotsEl.appendChild(d);
+  document.getElementById('f_' + s.id).addEventListener('change', e => {
+    const f = e.target.files[0], pv = document.getElementById('pv_' + s.id);
+    if (f) { pv.src = URL.createObjectURL(f); pv.hidden = false; } else pv.hidden = true;
+  });
+});
+
+async function analyze(slot, file) {
+  const fd = new FormData(); fd.append('file', file); fd.append('field_type', slot.field);
+  const resp = await fetch(base + '/api/analyze', { method: 'POST', body: fd });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  return resp.json();
+}
+
+function renderSlot(slot, d) {
+  const el = document.getElementById('r_' + slot.id); el.className = 'row';
+  let rows = [['status', stBadge(d.status)]];
+  if (slot.id === 'bulk') rows.push(['no_batch', esc(d.no_batch_raw)], ['mixing_date', esc(d.mixing_date_raw)]);
+  if (slot.id === 'im') rows.push(['im_number', esc(d.im_number)], ['umur simpan', d.shelf_life_value ? `${d.shelf_life_value.years ?? 0} th ${d.shelf_life_value.months ?? 0} bln` : 'tidak pasti/null']);
+  if (slot.id === 'exp') rows.push(['EXP (DDMMYY)', esc(d.extracted_date_code ?? d.raw_ocr_text)], ['format_valid', esc(d.format_valid)]);
+  if (slot.id === 'bat') rows.push(['kode', esc(d.raw_ocr_text)], ['batch_code', esc(d.batch_code)], ['3 huruf?', esc(d.batch_code_letters_ok)]);
+  if (d.error || d.error_reason) rows.push(['error', esc(d.error || d.error_reason)]);
+  rows.push(['waktu', esc(((d.processing_time_ms ?? 0) / 1000).toFixed(1)) + ' dtk']);
+  el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
+}
+
+// ---- perhitungan (HANYA alat testing; aturan final di ipc_app) ----
+function addMonths(dd, mm, yyyy, n) {
+  const total = (yyyy * 12 + (mm - 1)) + n, y = Math.floor(total / 12), m = (total % 12) + 1;
+  const dim = new Date(y, m, 0).getDate();
+  if (dd > dim) return { error: `hari ${dd} tidak ada di bulan ${m}/${y} (kandidat: ${dim}/${m}/${y})` };
+  return { dd, mm: m, yyyy: y };
+}
+const p2 = n => String(n).padStart(2, '0');
+
+function compute() {
+  const out = { notes: [], review: false };
+  const bulk = results.bulk, im = results.im;
+  // batch diharapkan
+  const nb = bulk && bulk.status !== 'ERROR' ? bulk.no_batch_raw : null;
+  const mb = nb && nb.match(/\/([A-Za-z]{3})$/);
+  out.batchExpected = mb ? mb[1] : null;
+  if (!bulk) out.notes.push('Foto Label Bulk belum ada.');
+  else if (bulk.status !== 'OK') { out.review = true; out.notes.push(`Label Bulk status ${bulk.status} -> review.`); }
+  if (bulk && !out.batchExpected) { out.review = true; out.notes.push('Batch diharapkan tidak bisa ditentukan (bukan tepat 3 huruf setelah "/").'); }
+  // exp diharapkan
+  const md = bulk && bulk.mixing_date_raw && bulk.mixing_date_raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const sv = im && im.shelf_life_value;
+  if (!im) out.notes.push('Foto IM belum ada.');
+  else if (im.status !== 'OK') { out.review = true; out.notes.push(`IM status ${im.status} -> review.`); }
+  if (md && sv) {
+    const months = (sv.years ?? 0) * 12 + (sv.months ?? 0);
+    const r = addMonths(+md[1], +md[2], +md[3], months);
+    if (r.error) { out.review = true; out.notes.push('EXP: ' + r.error); }
+    else { out.expExpected = p2(r.dd) + p2(r.mm) + String(r.yyyy).slice(2); out.expFull = `${p2(r.dd)}/${p2(r.mm)}/${r.yyyy}`; out.months = months; }
+  } else if (bulk && im) { out.review = true; out.notes.push('EXP diharapkan tidak bisa dihitung (mixing date atau umur simpan tidak pasti).'); }
+  return out;
+}
+
+function cmp(label, expected, got, srcOk) {
+  if (expected == null) return [label, badge('tidak ada acuan', 'na')];
+  if (got == null || got === '') return [label, badge('belum ada pembanding', 'na')];
+  const same = String(expected) === String(got);
+  if (!srcOk) return [label, badge(same ? 'sama tapi sumber belum yakin -> REVIEW' : 'beda & sumber belum yakin -> REVIEW', 'warn')];
+  return [label, same ? badge('SESUAI', 'ok') : badge('TIDAK SESUAI', 'bad')];
+}
+
+function renderSummary() {
+  const c = compute();
+  const man = { exp: document.getElementById('manExp').value.trim(), bat: document.getElementById('manBatch').value.trim() };
+  const exp = results.exp, bat = results.bat;
+  const tubeExp = exp ? (exp.format_valid ? exp.extracted_date_code : null) : (man.exp || null);
+  const expOk = exp ? exp.status === 'OK' && exp.format_valid === true : true;
+  const tubeBat = bat ? (bat.batch_code_letters_ok === true ? bat.batch_code : null) : (man.bat || null);
+  const batOk = bat ? bat.status === 'OK' && bat.format_valid === true && bat.batch_code_letters_ok === true : true;
+  const rows = [
+    ['EXP diharapkan', c.expFull ? `<b>${esc(c.expFull)}</b> (${c.months} bln dari mixing) = ${esc(c.expExpected)}` : badge('tidak tersedia', 'na')],
+    ['Batch diharapkan', c.batchExpected ? `<b>${esc(c.batchExpected)}</b>` : badge('tidak tersedia', 'na')],
+    ['EXP terbaca (tube/manual)', esc(tubeExp ?? '-')],
+    ['Batch terbaca (tube/manual)', esc(tubeBat ?? '-')],
+    cmp('Banding EXP', c.expExpected, tubeExp, expOk),
+    cmp('Banding batch', c.batchExpected, tubeBat, batOk),
+  ];
+  if (bat && bat.batch_code && bat.batch_code_letters_ok === false) rows.push(['catatan batch', badge('batch bukan 3 huruf -> REVIEW', 'warn')]);
+  c.notes.forEach(n => rows.push(['catatan', esc(n)]));
+  const anyBad = rows.some(r => String(r[1]).includes('TIDAK SESUAI'));
+  const allOk = !c.review && rows.filter(r => r[0].startsWith('Banding')).every(r => String(r[1]).includes('>SESUAI<')) && expOk && batOk;
+  const overall = anyBad ? badge('INDIKASI: TIDAK SESUAI', 'bad') : allOk ? badge('INDIKASI: SESUAI', 'ok') : badge('INDIKASI: PERLU REVIEW', 'warn');
+  document.getElementById('summary').className = '';
+  document.getElementById('summary').innerHTML = `<div class="row">${overall} <span class="hint">(alat testing; keputusan resmi di ipc_app)</span></div><table>` +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
+}
+
+document.getElementById('runAll').addEventListener('click', async () => {
+  const btn = document.getElementById('runAll'), msg = document.getElementById('runMsg');
+  btn.disabled = true;
+  for (const s of SLOTS) {
+    const f = document.getElementById('f_' + s.id).files[0];
+    if (!f) continue;
+    msg.textContent = `Membaca ${s.title}...`;
+    try { const d = await analyze(s, f); results[s.id] = d; renderSlot(s, d); }
+    catch (e) { document.getElementById('r_' + s.id).textContent = 'Gagal: ' + e.message; }
+  }
+  msg.textContent = 'Selesai.'; btn.disabled = false; renderSummary();
+});
+['manExp', 'manBatch'].forEach(id => document.getElementById(id).addEventListener('input', renderSummary));
+</script>
+</body>
+</html>
