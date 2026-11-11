@@ -386,20 +386,27 @@ def _build_im_result(views, attempts, bodies, elapsed):
     def value_set(entries):
         return {(e["years"], e["months"]) for e in entries}
 
-    primary_values = value_set(shelf)
+    # Keputusan user 2026-11-11: view yang mengembalikan daftar KOSONG = tidak
+    # ikut memilih (abstain), bukan tidak sepakat. Syarat: minimal 3 view
+    # (dan tidak lebih dari 1 view abstain) membaca, tiap view yang membaca
+    # menyatakan legible, dan gabungan nilainya TEPAT SATU. View yang membaca
+    # nilai BERBEDA tetap membatalkan (tidak pernah dianggap abstain).
+    voting = [v for v in views if v["shelf_life"]]
+    all_values = set().union(*(value_set(v["shelf_life"]) for v in voting)) if voting else set()
     agree = {
         "im_number": im_number is not None
         and all(norm(v["im_number"]) == im_number and v["legible"]["im_number"] for v in views),
-        "shelf_life": len(primary_values) == 1
-        and all(
-            value_set(v["shelf_life"]) == primary_values and v["legible"]["shelf_life"]
-            for v in views
-        ),
+        "shelf_life": len(voting) >= 3
+        and len(views) - len(voting) <= 1
+        and all(v["legible"]["shelf_life"] for v in voting)
+        and len(all_values) == 1,
     }
     shelf_value = None
     if agree["shelf_life"]:
-        years, months = next(iter(primary_values))
+        years, months = next(iter(all_values))
         shelf_value = {"years": years, "months": months}  # apa adanya, tanpa konversi
+        shelf = voting[0]["shelf_life"]  # entri dari view pertama yang membaca
+        legible["shelf_life"] = True
     format_ok = {
         "im_number": bool(im_number and IM_NUMBER_FORMAT.match(im_number)),
         "shelf_life": len(shelf) > 0 and all(_shelf_entry_ok(e) for e in shelf),

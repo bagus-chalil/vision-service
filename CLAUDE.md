@@ -558,9 +558,12 @@ Endpoint `main.py`:
       semua view memberi himpunan nilai identik dan TEPAT SATU nilai; respons
       menambah `shelf_life_value` ({years, months} apa adanya). Re-run 35 foto
       IM: 7 OK, 0 false OK (tidak mengubah laju OK; penghambat sebenarnya
-      adalah 1 view yang mengembalikan list kosong). What-if (belum diterapkan,
-      tunggu keputusan): view kosong = abstain, wajib >=3 view terbaca & tak ada
-      yang bertentangan → +4 OK (2109, 4360, 6554, 6569). Skema memakai `years`/`months`
+      adalah 1 view yang mengembalikan list kosong). **DITERAPKAN (user setuju,
+      2026-11-11):** view yang mengembalikan list kosong = abstain (bukan tidak
+      sepakat); syarat >=3 view membaca, maks 1 abstain, semua yang membaca legible,
+      gabungan nilai TEPAT SATU; view yang membaca nilai BERBEDA tetap membatalkan.
+      Re-run 35 foto IM: 10 OK (+2109, 4360, 6569, semua cocok foto), 0 false OK.
+      6554 tidak ikut naik (im_number antar-view tak sepakat). Skema memakai `years`/`months`
       nullable (bukan `value`+`unit`) karena ada "1 Tahun 6 bulan"; tidak ada
       konversi ke bulan di sini. Umur simpan TIDAK selalu ada di foto IM.
     - **Data**: `filling/date_bulk` di `ipc_attachments` (DB `ipc_system`,
