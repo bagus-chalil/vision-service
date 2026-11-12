@@ -936,6 +936,12 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       dinaikkan (2026-11-11, ipc_app commit `99a0db3`: kamera ideal 1920x1080,
       simpan maks 1600 px, JPEG 0.85) — belum dicek di tablet nyata; daftarkan
       di `ipc_app/config/vision.php`
+- [ ] **SAAT INTEGRASI ke ipc_app baca `docs/ai-learning-plan.md` bagian "PENGINGAT SAAT
+      INTEGRASI"** (advisory saja, development dulu, vision:ping, catat selisih, ukur ulang).
+- [x] Eval sampel acak vs DB (2026-11-12, `tools/evaluate_vs_db.py`, rencana
+      "AI makin pintar" di `docs/ai-learning-plan.md`): label_bulk 63/150 OK,
+      im_document 21/150 OK; view 640 px DIPUTUSKAN dipertahankan; 1 kemungkinan
+      false OK (foto 1505). Foto produksi baru sudah disalin ke `testdata_private/`.
 - [ ] Startup AI Cross-Check sisa: putuskan view 640 px, user cek 2 item
       `_verify`, selidiki 5 foto WhatsApp ERROR, kunci jawaban IM lebih
       banyak, daftar field_type baru di `ipc_app/config/vision.php`
