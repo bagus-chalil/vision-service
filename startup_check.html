@@ -36,7 +36,7 @@
   <h2>Pembanding manual (cadangan, opsional)</h2>
   <div class="row">EXP terbaca (DDMMYY): <input type="text" id="manExp" placeholder="mis. 080928" maxlength="6">
     &nbsp; Batch: <input type="text" id="manBatch" placeholder="mis. MJB" maxlength="3"></div>
-  <div class="hint">Urutan sumber pembanding: foto tube (slot 3/4) &rarr; foto coding non-tube (slot 5) &rarr; isian manual ini.</div>
+  <div class="hint">Sumber pembanding: foto Primary Coding (tube atau non-tube, otomatis) &rarr; isian manual ini bila tidak ada foto.</div>
 </div>
 
 <div style="margin:12px 0"><button class="primary" id="runAll">Jalankan semua foto yang sudah dipilih</button>
@@ -51,9 +51,7 @@ const base = location.protocol.startsWith('http') ? location.origin : 'http://lo
 const SLOTS = [
   { id: 'bulk', title: '1. Label Bulk', field: 'label_bulk' },
   { id: 'im',   title: '2. IM (umur simpan)', field: 'im_document' },
-  { id: 'exp',  title: '3. Tube - sisi EXP', field: 'tube_exp_date' },
-  { id: 'bat',  title: '4. Tube - sisi batch (kode depan)', field: 'tube_emboss_default' },
-  { id: 'cod',  title: '5. Non-tube - foto coding (batch + EXP)', field: 'coding_print' },
+  { id: 'pri',  title: '3. Primary Coding (tube ATAU non-tube, dibedakan otomatis; tube boleh 2 foto)', field: 'coding_print', second: true },
 ];
 const results = {};
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -67,30 +65,74 @@ SLOTS.forEach(s => {
     <input type="file" accept="image/*" id="f_${s.id}">
     <div class="hint">Pilih file / di tablet: ambil foto langsung.</div>
     <img class="pv" id="pv_${s.id}" hidden>
+    ${s.second ? `<div class="row" style="margin-top:10px"><b>Foto ke-2 (opsional)</b> - khusus tube: sisi lainnya (kode depan / EXP crimp)</div>
+    <input type="file" accept="image/*" id="f_${s.id}2">
+    <img class="pv" id="pv_${s.id}2" hidden>` : ''}
     <div id="r_${s.id}" class="row hint">-</div>`;
   slotsEl.appendChild(d);
-  document.getElementById('f_' + s.id).addEventListener('change', e => {
-    const f = e.target.files[0], pv = document.getElementById('pv_' + s.id);
-    if (f) { pv.src = URL.createObjectURL(f); pv.hidden = false; } else pv.hidden = true;
+  (s.second ? [s.id, s.id + '2'] : [s.id]).forEach(fid => {
+    document.getElementById('f_' + fid).addEventListener('change', e => {
+      const f = e.target.files[0], pv = document.getElementById('pv_' + fid);
+      if (f) { pv.src = URL.createObjectURL(f); pv.hidden = false; } else pv.hidden = true;
+    });
   });
 });
 
-async function analyze(slot, file) {
-  const fd = new FormData(); fd.append('file', file); fd.append('field_type', slot.field);
+async function call(file, field) {
+  const fd = new FormData(); fd.append('file', file); fd.append('field_type', field);
   const resp = await fetch(base + '/api/analyze', { method: 'POST', body: fd });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  const data = await resp.json();
-  // Slot batch: foto bisa berisi kode penuh (tanggal+batch+mfg) ATAU baris batch saja (3 huruf).
-  // Kalau format kode penuh tidak cocok, coba format batch-saja; dipakai hanya bila valid.
-  if (slot.id === 'bat' && data.format_valid !== true) {
-    const fd2 = new FormData(); fd2.append('file', file); fd2.append('field_type', 'tube_batch_code');
-    const r2 = await fetch(base + '/api/analyze', { method: 'POST', body: fd2 });
-    if (r2.ok) {
-      const d2 = await r2.json();
-      if (d2.format_valid === true) { d2._mode = 'batch_only'; return d2; }
+  return resp.json();
+}
+
+// Primary Coding: 1 foto. Langkah 1: coding_print (sekaligus membaca packaging_type).
+// tube -> jalankan jalur tube (EXP crimp + kode depan/batch) pada foto yang sama.
+// non_tube -> pakai hasil coding_print. unknown -> hasil ditampilkan, tapi REVIEW (tidak menebak).
+async function analyzePrimary(file) {
+  const cod = await call(file, 'coding_print');
+  const pri = { cod, kind: cod.packaging_type || 'unknown' };
+  if (pri.kind === 'tube') {
+    pri.exp = await call(file, 'tube_exp_date');
+    let bat = await call(file, 'tube_emboss_default');
+    if (bat.format_valid !== true) {
+      const b2 = await call(file, 'tube_batch_code');
+      if (b2.format_valid === true) { b2._mode = 'batch_only'; bat = b2; }
     }
+    pri.bat = bat;
   }
-  return data;
+  return pri;
+}
+
+// Gabung 2 foto (hanya bila keduanya tube). Per field dipilih hasil terbaik:
+// OK + format valid > format valid saja > hasil foto pertama.
+function mergePrimary(a, b) {
+  if (a.kind !== 'tube' || b.kind !== 'tube') {
+    const note = a.kind === b.kind ? null : `foto ke-2 terbaca "${b.kind}" (foto 1 "${a.kind}") -> jenis tidak konsisten`;
+    if (a.kind !== 'tube' && b.kind !== 'tube' && a.kind === b.kind) return { ...a, note: 'foto ke-2 diabaikan (bukan tube)' };
+    return { ...a, kind: 'unknown', note };
+  }
+  const rank = r => (r.format_valid === true ? (r.status === 'OK' ? 2 : 1) : 0);
+  const best = (x, y) => (rank(y) > rank(x) ? y : x);
+  return { cod: a.cod, kind: 'tube', exp: best(a.exp, b.exp), bat: best(a.bat, b.bat), note: '2 foto digabung' };
+}
+
+function renderPrimary(slot, p) {
+  const el = document.getElementById('r_' + slot.id); el.className = 'row';
+  const kindBadge = p.kind === 'tube' ? badge('TUBE -> jalur tube', 'ok') : p.kind === 'non_tube' ? badge('NON-TUBE -> jalur coding', 'ok') : badge('TIDAK PASTI -> REVIEW', 'warn');
+  let rows = [['jenis kemasan', kindBadge]];
+  if (p.kind === 'tube') {
+    const e = p.exp, b = p.bat;
+    rows.push(['EXP status', stBadge(e.status)], ['EXP (DDMMYY)', esc(e.extracted_date_code ?? '-')], ['EXP format_valid', esc(e.format_valid)],
+      ['kode depan status', stBadge(b.status)], ['jenis foto kode', b._mode === 'batch_only' ? 'batch saja' : 'kode penuh'],
+      ['kode', esc(b.extracted_date_code ?? b.raw_ocr_text)], ['batch_code', esc(b.batch_code)], ['3 huruf?', esc(b.batch_code_letters_ok)]);
+  } else {
+    const d = p.cod;
+    rows.push(['status', stBadge(d.status)], ['batch', esc(d.batch_raw)], ['EXP (apa adanya)', esc(d.exp_raw)], ['format EXP', esc(d.exp_format)], ['dibaca via', esc(d.read_via)]);
+    if (d.error || d.error_reason) rows.push(['error', esc(d.error || d.error_reason)]);
+  }
+  if (p.note) rows.push(['catatan gabungan', esc(p.note)]);
+  if (p.kind === 'tube') rows.push(['catatan', 'Satu foto hanya memperlihatkan satu sisi tube; tambahkan foto ke-2 untuk sisi lainnya.']);
+  el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
 }
 
 function renderSlot(slot, d) {
@@ -177,7 +219,7 @@ function renderSummary() {
     cmp('Banding batch', c.batchExpected, tubeBat, batOk),
   ];
   if (monthYearOnly) rows.push(['catatan EXP', 'EXP tercetak bulan-tahun; hari tidak dibandingkan.']);
-  if (cod && !exp && cod.packaging_type === 'tube') { c.review = true; rows.push(['catatan kemasan', badge('foto coding terdeteksi tube -> REVIEW', 'warn')]); }
+  if (cod && cod.packaging_type === 'unknown') { c.review = true; rows.push(['catatan kemasan', badge('jenis kemasan tidak pasti -> REVIEW', 'warn')]); }
   if (bat && bat.batch_code && bat.batch_code_letters_ok === false) rows.push(['catatan batch', badge('batch bukan 3 huruf -> REVIEW', 'warn')]);
   c.notes.forEach(n => rows.push(['catatan', esc(n)]));
   const anyBad = rows.some(r => String(r[1]).includes('TIDAK SESUAI'));
@@ -195,7 +237,14 @@ document.getElementById('runAll').addEventListener('click', async () => {
     const f = document.getElementById('f_' + s.id).files[0];
     if (!f) continue;
     msg.textContent = `Membaca ${s.title}...`;
-    try { const d = await analyze(s, f); results[s.id] = d; renderSlot(s, d); }
+    try {
+      if (s.id === 'pri') {
+        let p = await analyzePrimary(f);
+        const f2 = document.getElementById('f_pri2').files[0];
+        if (f2) { msg.textContent = 'Membaca foto ke-2...'; p = mergePrimary(p, await analyzePrimary(f2)); }
+        results.cod = p.cod; results.exp = p.exp; results.bat = p.bat; renderPrimary(s, p);
+      } else { const d = await call(f, s.field); results[s.id] = d; renderSlot(s, d); }
+    }
     catch (e) { document.getElementById('r_' + s.id).textContent = 'Gagal: ' + e.message; }
   }
   msg.textContent = 'Selesai.'; btn.disabled = false; renderSummary();

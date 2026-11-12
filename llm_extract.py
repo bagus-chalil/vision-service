@@ -588,6 +588,14 @@ def coding_exp_format(exp_raw):
     return "UNKNOWN", None
 
 
+def _majority_kind(kinds):
+    """tube / non_tube bila >= 75% view sepakat, selain itu unknown."""
+    for kind in ("tube", "non_tube"):
+        if kinds and kinds.count(kind) / len(kinds) >= 0.75:
+            return kind
+    return "unknown"
+
+
 def _coding_consensus(views):
     """Same multi-size consensus as label_bulk: a value is trusted only when
     EVERY view reads it identically and calls it legible. Never majority vote -
@@ -617,9 +625,11 @@ def _coding_consensus(views):
         "exp_suffix": norm(primary["exp_suffix"]),
         "exp_format": exp_format,
         "exp_parts": exp_parts,
-        # Flag only: never used to route/choose a pipeline (field_type comes from
-        # the caller - CLAUDE.md design principle). Views disagree -> "unknown".
-        "packaging_type": kinds[0] if len(set(kinds)) == 1 else "unknown",
+        # Dipakai halaman /startup-check untuk memilih jalur tube vs non-tube
+        # (permintaan user 2026-11-12). Butuh >= 3/4 view sepakat (bukan semua:
+        # view 640 px sering menyimpang pada foto tube yang jelas); kalau tidak
+        # -> "unknown" (REVIEW, tidak menebak). Nilai batch/EXP tetap konsensus penuh.
+        "packaging_type": _majority_kind(kinds),
         "legible": legible,
         "format_ok": format_ok,
         "view_agreement": agree,

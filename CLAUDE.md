@@ -49,7 +49,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `llm_extract.py` | Ekstraksi via LLM (Ollama, vision): `analyze_label_bulk()`, `analyze_im_document()`, `analyze_coding_print()` (coding NON-TUBE, gotcha #20). Plain import sibling `main.py`, didaftarkan lewat `LLM_FIELD_TYPES` di `main.py`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`/`IM_VIEW_SIDES`/`CODING_VIEW_SIDES`, dst) — lihat gotcha #19 |
 | `tools/evaluate_label_bulk.py` | Evaluasi akurasi per field + kecepatan `label_bulk` vs kunci jawaban (`tools/eval_data/label_bulk_truth.json`, `--truth` untuk file lain). Membedakan WRONG_CONFIDENT (lolos gerbang tapi salah = berbahaya) dari salah-tapi-ter-flag |
 | `tools/evaluate_coding_print.py` | Evaluasi `coding_print`. `--truth` menerima kunci bacaan foto (`batch`/`exp`) ATAU kunci data DB (`db_batch`/`db_exp_*`; OK yang beda DB = `OK_BEDA_DB_CEK_VISUAL`, wajib dicek mata, karena coding bisa memang beda dari DB) |
-| `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json`, `coding_print/` (foto coding, nama = `ipc_attachments.id`; `_set2_db.json` = kunci DB set 2), `coding_print_truth.json` (kunci bacaan foto set 1) |
+| `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json`, `coding_print/` (foto coding, nama = `ipc_attachments.id`; `_set2_db.json` = kunci DB set 2), `coding_print_truth.json` (kunci bacaan foto set 1). `tube/` (2026-11-12, `tools/extract_tube_dataset.py`): `photos/` = 405 foto `image_tube` (filling) dari DB + 36 fixture `images/`, `manifest.json` = kunci DB per foto. CATATAN: `image_tube` DB mayoritas foto produk utuh/jauh (banyak BUKAN tube, tanpa emboss terbaca) - belum dipilah. `tube/photos_candidates/` (235 foto, `tools/classify_tube_candidates.py` -> `tube/classify.json`) = foto coding packing/startup yang Qwen (1 view, penyaring awal, belum dicek penuh) nilai TUBE; 175 dengan kode emboss di crimp, 150 di antaranya ada garis hitam menimpa kode (sensor/eye mark, posisi sama di semua tube - lihat gotcha #14). Baseline 2026-11-12 (`tools/baseline_tube_exp.py`, jalur Ollama `coding_print`, 175 foto tube berkode crimp, kunci DB): 5 OK (semua cocok DB), 170 LOW, 0 false OK; garis hitam 1/128 OK vs tanpa garis 4/47 OK. `tube_exp_date` (PaddleOCR) BELUM diukur di set ini (CPU, bukan di laptop). Prototype mode topeng (`tools/proto_masked_exp.py`, model baca EXP 6 char dgn '?' tanpa diberi nilai DB, 3 view per-posisi, cocok ke DB dgn wildcard): FULL_MATCH 23, PARTIAL_CONSISTENT 42, CONFLICT 26, NO_SIGNAL 84 (dari 175). TEMUAN: model HALUSINASI di bawah garis hitam walau 3 view konsisten (mis. 7723 baca '9' di posisi tertutup) -> CONFLICT bisa konflik palsu, jangan dipakai utk FAIL; perlu deteksi garis hitam via OpenCV utk memaksa posisi di bawahnya '?' (belum dikerjakan). Detektor garis hitam OpenCV DICOBA & DIBUANG (2026-11-12): hanya menemukan 54 dari ±128 foto bergaris (garis cuma ±3 px di foto jauh, butuh lokalisasi crimp dulu) + false positive (stiker kuning, huruf logo) - flag Qwen `black_mark_over_code` justru lebih akurat di cek visual. Garis ini tercetak di crimp SEMUA tube yang dilihat, jadi kebijakan yang diusulkan: ANGGAP selalu ada, 1 posisi selalu tak terverifikasi (toleransi 1 beda -> REVIEW, bukan konflik; FULL_MATCH bukan bukti kuat). Dari 26 CONFLICT: 11 beda 1 posisi, 15 beda >=2. Prototype BELUM masuk main.py/llm_extract.py |
 | `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
 | `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
 | `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
@@ -653,6 +653,35 @@ Endpoint `main.py`:
       false PASS hanya bila salah baca kebetulan sama persis dengan nilai yang
       diharapkan.
 
+21. **Slot "Primary Coding" tunggal di `/startup-check` (2026-11-12) — meniru
+    form ipc startup yang cuma punya satu upload primary coding.** Slot 3/4/5
+    lama (tube EXP / tube batch / non-tube) digabung jadi 1 slot (+ foto ke-2
+    opsional khusus tube). Alur (`analyzePrimary()` di `startup_check.html`):
+    (1) `coding_print` dulu -> `packaging_type`; (2) `tube` -> foto yang sama
+    juga lewat `tube_exp_date` + `tube_emboss_default` (fallback
+    `tube_batch_code` bila format kode penuh tak valid); `non_tube` -> pakai
+    hasil `coding_print`; `unknown` -> tampil tapi REVIEW, tidak menebak.
+    Foto ke-2 (`mergePrimary()`): hanya digabung bila KEDUA foto terbaca
+    `tube`; per field dipilih hasil terbaik (OK+format valid > format valid >
+    foto 1), nilai tidak pernah digabung per karakter; jenis beda -> `unknown`.
+    - **Ini MENGUBAH keputusan lama gotcha #20** ("`packaging_type` hanya flag,
+      tidak memilih jalur"): di halaman uji ini flag itu sekarang memilih jalur,
+      atas permintaan eksplisit user. field_type API tetap dari luar; ini hanya
+      alur halaman uji. Kalau diintegrasikan ke ipc_app, putuskan ulang.
+    - **`packaging_type` diputuskan >= 3 dari 4 view sepakat** (`_majority_kind()`
+      di `llm_extract.py`), bukan semua view. Bug nyata: `images/Media (2).jpg`
+      (tube jelas) -> 3 view `tube` + 1 view (kecil) `non_tube` -> aturan lama
+      "semua sama" memberi `unknown`. Nilai batch/EXP TETAP konsensus semua view.
+      Hanya diukur di beberapa foto, belum di 76 foto set `coding_print`.
+    - **Jebakan operasional:** setelah ubah `llm_extract.py` server WAJIB
+      di-restart (instance lama diam-diam tetap jalan dan bikin `[Errno 10048]`
+      saat start ulang); HTML di-cache browser -> hard refresh (Ctrl+Shift+R).
+    - **Akurasi tube MASIH KURANG** (tes 2026-11-12, `Media 10.jpg` x2): EXP
+      `LOW_CONFIDENCE`/`format_valid false` (tidak terbaca), kode depan
+      `310826QHB8` `LOW_CONFIDENCE`, batch `QHB` vs diharapkan `BJB` ->
+      "beda & sumber belum yakin -> REVIEW" (arah aman, bukan false PASS).
+      Sesi baru direncanakan khusus membahas peningkatan akurasi tube.
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -931,6 +960,11 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
 - [x] `coding_print` non-tube (2026-11-11, gotcha #20): `llm_extract.analyze_coding_print`,
       terdaftar di `main.py`, slot 5 di `/startup-check` (kolom manual tetap
       cadangan), `tools/evaluate_coding_print.py`. Belum di-commit.
+- [x] Slot Primary Coding tunggal di `/startup-check` (2026-11-12, gotcha #21):
+      tube/non-tube dibedakan otomatis lewat `packaging_type` (>= 3/4 view),
+      tube boleh 2 foto. Belum di-commit.
+- [ ] **Akurasi tube perlu ditingkatkan** (EXP/kode depan sering LOW_CONFIDENCE,
+      lihat gotcha #21) — dibahas di sesi baru.
 - [ ] `coding_print` sisa: user cek item `_verify` di `coding_print_truth.json`
       + 2 foto tak pasti (2468, 847); resolusi unggah foto di ipc_app SUDAH
       dinaikkan (2026-11-11, ipc_app commit `99a0db3`: kamera ideal 1920x1080,
