@@ -28,15 +28,15 @@
 </head>
 <body>
 <h1>Startup Check - Uji Gabungan (alat testing)</h1>
-<div class="sub">Foto Label Bulk + IM + tube (atau ketik manual untuk non-tube) &rarr; EXP &amp; batch diharapkan dihitung <b>di browser ini</b>, lalu dibandingkan. Vision Service hanya membaca; <b>keputusan PASS/FAIL sebenarnya di ipc_app</b>. Hasil di bawah hanya indikasi untuk uji.</div>
+<div class="sub">Foto Label Bulk + IM + tube atau foto coding non-tube (atau ketik manual) &rarr; EXP &amp; batch diharapkan dihitung <b>di browser ini</b>, lalu dibandingkan. Vision Service hanya membaca; <b>keputusan PASS/FAIL sebenarnya di ipc_app</b>. Hasil di bawah hanya indikasi untuk uji.</div>
 
 <div class="grid" id="slots"></div>
 
 <div class="card" style="margin-top:12px">
-  <h2>Pembanding non-tube / manual (opsional, menggantikan foto tube)</h2>
+  <h2>Pembanding manual (cadangan, opsional)</h2>
   <div class="row">EXP terbaca (DDMMYY): <input type="text" id="manExp" placeholder="mis. 080928" maxlength="6">
     &nbsp; Batch: <input type="text" id="manBatch" placeholder="mis. MJB" maxlength="3"></div>
-  <div class="hint">Kalau diisi dan foto tube kosong, nilai ini yang dibandingkan.</div>
+  <div class="hint">Urutan sumber pembanding: foto tube (slot 3/4) &rarr; foto coding non-tube (slot 5) &rarr; isian manual ini.</div>
 </div>
 
 <div style="margin:12px 0"><button class="primary" id="runAll">Jalankan semua foto yang sudah dipilih</button>
@@ -53,6 +53,7 @@ const SLOTS = [
   { id: 'im',   title: '2. IM (umur simpan)', field: 'im_document' },
   { id: 'exp',  title: '3. Tube - sisi EXP', field: 'tube_exp_date' },
   { id: 'bat',  title: '4. Tube - sisi batch (kode depan)', field: 'tube_emboss_default' },
+  { id: 'cod',  title: '5. Non-tube - foto coding (batch + EXP)', field: 'coding_print' },
 ];
 const results = {};
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -99,6 +100,9 @@ function renderSlot(slot, d) {
   if (slot.id === 'im') rows.push(['im_number', esc(d.im_number)], ['umur simpan', d.shelf_life_value ? `${d.shelf_life_value.years ?? 0} th ${d.shelf_life_value.months ?? 0} bln` : 'tidak pasti/null']);
   if (slot.id === 'exp') rows.push(['EXP (DDMMYY)', esc(d.extracted_date_code ?? d.raw_ocr_text)], ['format_valid', esc(d.format_valid)]);
   if (slot.id === 'bat') rows.push(['jenis foto', d._mode === 'batch_only' ? 'batch saja' : 'kode penuh'], ['kode', esc(d.raw_ocr_text)], ['batch_code', esc(d.batch_code)], ['3 huruf?', esc(d.batch_code_letters_ok)]);
+  if (slot.id === 'cod') rows.push(['batch', esc(d.batch_raw)], ['EXP (apa adanya)', esc(d.exp_raw)], ['format EXP', esc(d.exp_format)],
+    ['jenis kemasan (flag)', d.packaging_type === 'tube' ? badge('tube? cek - slot ini untuk non-tube', 'warn') : esc(d.packaging_type)],
+    ['dibaca via', esc(d.read_via)]);
   if (d.error || d.error_reason) rows.push(['error', esc(d.error || d.error_reason)]);
   rows.push(['waktu', esc(((d.processing_time_ms ?? 0) / 1000).toFixed(1)) + ' dtk']);
   el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
@@ -148,19 +152,32 @@ function cmp(label, expected, got, srcOk) {
 function renderSummary() {
   const c = compute();
   const man = { exp: document.getElementById('manExp').value.trim(), bat: document.getElementById('manBatch').value.trim() };
-  const exp = results.exp, bat = results.bat;
-  const tubeExp = exp ? (exp.format_valid ? exp.extracted_date_code : null) : (man.exp || null);
-  const expOk = exp ? exp.status === 'OK' && exp.format_valid === true : true;
-  const tubeBat = bat ? (bat.batch_code_letters_ok === true ? bat.batch_code : null) : (man.bat || null);
-  const batOk = bat ? bat.status === 'OK' && bat.format_valid === true && bat.batch_code_letters_ok === true : true;
+  const exp = results.exp, bat = results.bat, cod = results.cod;
+  // Sumber pembanding: tube -> coding non-tube -> manual.
+  let tubeExp, expOk, tubeBat, batOk, expSrc = 'manual', batSrc = 'manual', expExpected = c.expExpected, monthYearOnly = false;
+  if (exp) { tubeExp = exp.format_valid ? exp.extracted_date_code : null; expOk = exp.status === 'OK' && exp.format_valid === true; expSrc = 'tube'; }
+  else if (cod) {
+    expSrc = 'coding non-tube'; expOk = cod.status === 'OK';
+    if (cod.exp_format === 'MM_YYYY' && cod.exp_parts) {
+      // EXP tercetak bulan-tahun: hanya bulan+tahun yang dibandingkan (hari tidak ada di kemasan).
+      monthYearOnly = true;
+      tubeExp = `${cod.exp_parts.month}/${cod.exp_parts.year}`;
+      expExpected = c.expFull ? c.expFull.slice(3) : null;
+    } else tubeExp = cod.exp_format === 'DDMMYY' ? cod.exp_raw : null;
+  } else { tubeExp = man.exp || null; expOk = true; }
+  if (bat) { tubeBat = bat.batch_code_letters_ok === true ? bat.batch_code : null; batOk = bat.status === 'OK' && bat.format_valid === true && bat.batch_code_letters_ok === true; batSrc = 'tube'; }
+  else if (cod) { tubeBat = cod.format_ok && cod.format_ok.batch ? cod.batch_raw : null; batOk = cod.status === 'OK'; batSrc = 'coding non-tube'; }
+  else { tubeBat = man.bat || null; batOk = true; }
   const rows = [
     ['EXP diharapkan', c.expFull ? `<b>${esc(c.expFull)}</b> (${c.months} bln dari mixing) = ${esc(c.expExpected)}` : badge('tidak tersedia', 'na')],
     ['Batch diharapkan', c.batchExpected ? `<b>${esc(c.batchExpected)}</b>` : badge('tidak tersedia', 'na')],
-    ['EXP terbaca (tube/manual)', esc(tubeExp ?? '-')],
-    ['Batch terbaca (tube/manual)', esc(tubeBat ?? '-')],
-    cmp('Banding EXP', c.expExpected, tubeExp, expOk),
+    [`EXP terbaca (${expSrc})`, esc(tubeExp ?? '-')],
+    [`Batch terbaca (${batSrc})`, esc(tubeBat ?? '-')],
+    cmp(monthYearOnly ? 'Banding EXP (bulan/tahun saja)' : 'Banding EXP', expExpected, tubeExp, expOk),
     cmp('Banding batch', c.batchExpected, tubeBat, batOk),
   ];
+  if (monthYearOnly) rows.push(['catatan EXP', 'EXP tercetak bulan-tahun; hari tidak dibandingkan.']);
+  if (cod && !exp && cod.packaging_type === 'tube') { c.review = true; rows.push(['catatan kemasan', badge('foto coding terdeteksi tube -> REVIEW', 'warn')]); }
   if (bat && bat.batch_code && bat.batch_code_letters_ok === false) rows.push(['catatan batch', badge('batch bukan 3 huruf -> REVIEW', 'warn')]);
   c.notes.forEach(n => rows.push(['catatan', esc(n)]));
   const anyBad = rows.some(r => String(r[1]).includes('TIDAK SESUAI'));

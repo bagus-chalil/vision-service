@@ -14,6 +14,7 @@ Design rules (see CLAUDE.md + docs/startup-ai-crosscheck-plan.md):
     OLLAMA_THINK          default false  (false | low | medium | high)
     OLLAMA_TIMEOUT        default 120    (seconds, per attempt)
     LABEL_VIEW_SIDES      default 1024,640,1600,2048 (image sizes = views; all must agree)
+    IM_VIEW_SIDES / CODING_VIEW_SIDES  per-field override, fallback LABEL_VIEW_SIDES
     OLLAMA_NUM_CTX        default 8192
 
 Plain import (sibling of main.py), same convention as tube_emboss_pipeline.py.
@@ -477,3 +478,254 @@ def analyze_label_bulk(image_bgr):
     except LlmBadJson as exc:
         return _error_result("label_bulk", f"LLM_BAD_JSON: {exc}", time.perf_counter() - start)
     return _build_label_bulk_result(views, attempts, bodies, time.perf_counter() - start)
+
+
+# --------------------------------------------------------------------------
+# coding_print: foto coding NON-TUBE (batch + EXP tercetak di kotak/jar/tutup/
+# botol/label). Tube emboss tetap lewat tube_emboss_pipeline.
+# --------------------------------------------------------------------------
+
+CODING_PROMPT = """You are reading a photo taken on a cosmetics production line. Somewhere on the product, its box, cap, jar or a sticker there may be a machine-printed production CODING (inkjet, laser, thermal-transfer or a printed label) that states the batch code and the expiry date. Typical layouts:
+  "OKB EXP 231029 CW"   (3-letter batch, EXP, 6-digit date DDMMYY, 2-letter initials)
+  "AKB" on one line and "EXP 191029 QW" on the next line
+  "BATCH : BKB" / "EXP DATE : 301029 MH"
+  "Batch No: EKB" / "Mfg Date: 201026" / "Exp Date: 201029"
+  "AKB EXP 10 2029 GK"  (expiry as month + 4-digit year)
+
+Transcribe exactly as printed, character by character. Do not correct, reformat or guess.
+1. batch: the batch code only (the code after "BATCH"/"Batch No"/"BN", or the code printed directly before "EXP" on the same coding). Usually 3 letters.
+2. exp: ONLY the expiry date characters that follow "EXP"/"EXP DATE"/"Exp Date", keeping spaces/dots/slashes exactly as printed (e.g. "231029", "10 2029"). Do NOT include the label "EXP" and do NOT include the trailing initials (e.g. "CW").
+3. exp_suffix: the short code printed right after the expiry date on the same line (e.g. "CW"), or null if none.
+4. packaging_type: the kind of product container that is the main subject of the photo:
+   - "tube": a squeezable, flexible plastic/laminate tube whose end is a flat, pressed (crimp-sealed) strip, usually with a screw or flip cap at the other end.
+   - "non_tube": anything else that is a product container: carton box, jar, bottle, cap/lid, lipstick or stick, compact, pump, pouch/sachet.
+   - "unknown": no product container visible (only paper/forms, a blank/dark frame, a pallet), or you cannot tell.
+
+Strict rules:
+- Read ONLY machine-printed coding. IGNORE all handwriting (pen/marker on forms or paper), even if it looks like a coding.
+- IGNORE manufacturing/production dates (Mfg Date, MFD, Prod), NA/BPOM numbers, barcodes, ingredient text and product names.
+- If two or more printed codings with DIFFERENT values are visible, set both values to null and legible false.
+- If there is no printed coding in the photo, return null for every value and legible false.
+- Glare, blur, small size, cut-off, smudge or anything covering even ONE character makes the WHOLE value illegible: return null and legible=false. Never complete a value so it fits the expected format. A wrong confident value is far worse than null.
+- legible.<field> is true only if you read every character of that value with certainty.
+
+Answer with JSON only:
+{"batch": string|null, "exp": string|null, "exp_suffix": string|null, "packaging_type": "tube"|"non_tube"|"unknown",
+ "legible": {"batch": boolean, "exp": boolean}}"""
+
+CODING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "batch": {"type": ["string", "null"]},
+        "exp": {"type": ["string", "null"]},
+        "exp_suffix": {"type": ["string", "null"]},
+        "packaging_type": {"type": "string", "enum": ["tube", "non_tube", "unknown"]},
+        "legible": {
+            "type": "object",
+            "properties": {"batch": {"type": "boolean"}, "exp": {"type": "boolean"}},
+            "required": ["batch", "exp"],
+        },
+    },
+    "required": ["batch", "exp", "exp_suffix", "packaging_type", "legible"],
+}
+
+CODING_LOCATE_PROMPT = """Find the machine-printed production coding in this photo (the printed text with a batch code and "EXP" expiry date, e.g. "OKB EXP 231029 CW" or "BATCH : BKB / EXP DATE : 301029"). Ignore handwriting, barcodes, ingredient text.
+Return its bounding box covering ALL lines of that coding, as integers normalised to 0-1000 of the image width/height: [x1, y1, x2, y2].
+If there is no printed coding, set found to false.
+JSON only: {"found": boolean, "box": [x1, y1, x2, y2] | null}"""
+
+CODING_LOCATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "found": {"type": "boolean"},
+        "box": {"type": ["array", "null"], "items": {"type": "integer"}},
+    },
+    "required": ["found", "box"],
+}
+
+# Flags only - a mismatch never edits the value.
+CODING_BATCH_FORMAT = re.compile(r"^[A-Za-z]{3}$")
+CODING_EXP_DDMMYY = re.compile(r"^(0[1-9]|[12][0-9]|3[01])(0[1-9]|1[0-2])([0-9]{2})$")
+CODING_EXP_MM_YYYY = re.compile(r"^(0[1-9]|1[0-2])[ ./-](20[0-9]{2})$")
+PACKAGING_TYPES = ("tube", "non_tube", "unknown")
+
+
+def _validate_coding(data):
+    for key in ("batch", "exp", "exp_suffix"):
+        if key not in data or not (data[key] is None or isinstance(data[key], str)):
+            raise LlmBadJson(f"field {key} missing or wrong type")
+    if data.get("packaging_type") not in PACKAGING_TYPES:
+        raise LlmBadJson("packaging_type missing or invalid")
+    legible = data.get("legible")
+    if not isinstance(legible, dict) or any(
+        not isinstance(legible.get(k), bool) for k in ("batch", "exp")
+    ):
+        raise LlmBadJson("legible missing or wrong type")
+
+
+def _validate_coding_locate(data):
+    if not isinstance(data.get("found"), bool):
+        raise LlmBadJson("found missing")
+    box = data.get("box")
+    if data["found"] and not (
+        isinstance(box, list) and len(box) == 4 and all(isinstance(v, int) for v in box)
+    ):
+        raise LlmBadJson("box malformed")
+
+
+def coding_exp_format(exp_raw):
+    """Classify the printed EXP string WITHOUT changing it. exp_parts are plain
+    substrings of exp_raw (no conversion, no date math - that is ipc_app's job).
+    Returns (exp_format, exp_parts): DDMMYY / MM_YYYY / UNKNOWN / None."""
+    if not exp_raw:
+        return None, None
+    m = CODING_EXP_DDMMYY.match(exp_raw)
+    if m:
+        return "DDMMYY", {"day": m.group(1), "month": m.group(2), "year": m.group(3)}
+    m = CODING_EXP_MM_YYYY.match(exp_raw)
+    if m:
+        return "MM_YYYY", {"day": None, "month": m.group(1), "year": m.group(2)}
+    return "UNKNOWN", None
+
+
+def _coding_consensus(views):
+    """Same multi-size consensus as label_bulk: a value is trusted only when
+    EVERY view reads it identically and calls it legible. Never majority vote -
+    measured (2026-11-11): on a small print 3 of 4 views agreed on a WRONG digit."""
+
+    def norm(v):
+        return v.strip() if (v is not None and v.strip()) else None
+
+    primary = views[0]
+    raw = {k: norm(primary[k]) for k in ("batch", "exp")}
+    legible = {k: bool(primary["legible"][k]) and raw[k] is not None for k in raw}
+    agree = {
+        k: raw[k] is not None
+        and all(norm(v[k]) == raw[k] and bool(v["legible"][k]) for v in views)
+        for k in raw
+    }
+    exp_format, exp_parts = coding_exp_format(raw["exp"])
+    format_ok = {
+        "batch": bool(raw["batch"] and CODING_BATCH_FORMAT.match(raw["batch"])),
+        "exp": exp_format in ("DDMMYY", "MM_YYYY"),
+    }
+    trusted = {k: legible[k] and agree[k] and format_ok[k] for k in raw}
+    kinds = [v["packaging_type"] for v in views]
+    return {
+        "batch_raw": raw["batch"],
+        "exp_raw": raw["exp"],
+        "exp_suffix": norm(primary["exp_suffix"]),
+        "exp_format": exp_format,
+        "exp_parts": exp_parts,
+        # Flag only: never used to route/choose a pipeline (field_type comes from
+        # the caller - CLAUDE.md design principle). Views disagree -> "unknown".
+        "packaging_type": kinds[0] if len(set(kinds)) == 1 else "unknown",
+        "legible": legible,
+        "format_ok": format_ok,
+        "view_agreement": agree,
+        "trusted": trusted,
+        "views_read": [
+            {"batch": v["batch"], "exp": v["exp"], "packaging_type": v["packaging_type"]}
+            for v in views
+        ],
+    }
+
+
+def _read_coding_views(image_bgr, cfg):
+    views, bodies, attempts = [], [], 0
+    for side in _view_sides("CODING_VIEW_SIDES"):
+        data, n, body = _extract_with_retry(
+            CODING_PROMPT, _encode_image(image_bgr, side), CODING_SCHEMA, cfg, _validate_coding
+        )
+        views.append(data)
+        bodies.append(body)
+        attempts += n
+    return views, bodies, attempts
+
+
+def _crop_normalised_box(image_bgr, box, pad=0.6, min_frac=0.12):
+    """Crop around a 0-1000 normalised box with generous padding (never tighter
+    than min_frac of the frame) so a slightly-off box still contains the coding."""
+    h, w = image_bgr.shape[:2]
+    x1, y1, x2, y2 = [max(0, min(1000, v)) for v in box]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    bw, bh = (x2 - x1) / 1000 * w, (y2 - y1) / 1000 * h
+    cx, cy = (x1 + x2) / 2000 * w, (y1 + y2) / 2000 * h
+    half_w = max(bw * (1 + pad), w * min_frac) / 2
+    half_h = max(bh * (1 + pad * 2), h * min_frac) / 2
+    a, b = int(max(0, cx - half_w)), int(max(0, cy - half_h))
+    c, d = int(min(w, cx + half_w)), int(min(h, cy + half_h))
+    crop = image_bgr[b:d, a:c]
+    return crop if crop.size else None
+
+
+def analyze_coding_print(image_bgr):
+    """coding_print contract (non-tube batch + EXP). Raw transcription only:
+    no PASS/FAIL, no date math, never strips/corrects. Two passes:
+      1. whole photo, 4-size consensus.
+      2. ONLY if pass 1 is not OK ("rescue"): the model points at the coding,
+         it is cropped + re-read with the same 4-size consensus. The rescued value
+         is accepted only if pass 1 already read exactly that value in at least one
+         view (independent corroboration). A pass-1 OK is never touched, so the
+         rescue can only turn LOW into OK, never change an OK value.
+    Measured 2026-11-11 (76 foto, scratchpad prototype): 44 OK all correct,
+    0 false OK; rescue added 5 of those."""
+    cfg = _cfg()
+    start = time.perf_counter()
+    try:
+        views, bodies, attempts = _read_coding_views(image_bgr, cfg)
+        result = _coding_consensus(views)
+        result["read_via"] = "full_frame"
+        rescue_info = None
+        if not all(result["trusted"].values()):
+            loc, n, _ = _extract_with_retry(
+                CODING_LOCATE_PROMPT,
+                _encode_image(image_bgr, 1024),
+                CODING_LOCATE_SCHEMA,
+                cfg,
+                _validate_coding_locate,
+            )
+            attempts += n
+            crop = _crop_normalised_box(image_bgr, loc["box"]) if loc["found"] and loc["box"] else None
+            rescue_info = {"located": crop is not None, "box": loc.get("box")}
+            if crop is not None:
+                c_views, _, n = _read_coding_views(crop, cfg)
+                attempts += n
+                rescued = _coding_consensus(c_views)
+                pass1_values = {(v["batch"], v["exp"]) for v in views}
+                corroborated = (rescued["batch_raw"], rescued["exp_raw"]) in pass1_values
+                rescue_info.update(
+                    status="OK" if all(rescued["trusted"].values()) else "LOW_CONFIDENCE",
+                    batch_raw=rescued["batch_raw"],
+                    exp_raw=rescued["exp_raw"],
+                    corroborated_by_pass1=corroborated,
+                    views_read=rescued["views_read"],
+                )
+                if all(rescued["trusted"].values()) and corroborated:
+                    keep_pkg = result["packaging_type"]  # crop says nothing about the container
+                    result = rescued
+                    result["packaging_type"] = keep_pkg
+                    result["read_via"] = "crop_rescue"
+        result["rescue"] = rescue_info
+    except LlmUnavailable as exc:
+        return _error_result("coding_print", f"LLM_UNAVAILABLE: {exc}", time.perf_counter() - start)
+    except LlmBadJson as exc:
+        return _error_result("coding_print", f"LLM_BAD_JSON: {exc}", time.perf_counter() - start)
+
+    if all(result["trusted"].values()):
+        status, confidence = "OK", 0.95
+    else:
+        status = "LOW_CONFIDENCE"
+        confidence = 0.5 if any(result["trusted"].values()) else 0.2
+    result.update(
+        # NOT a calibrated probability: routing signal from legibility + format +
+        # multi-view agreement only.
+        confidence=confidence,
+        status=status,
+        engine_used="ollama",
+        model=bodies[0].get("model"),
+        attempts=attempts,
+        elapsed_sec=round(time.perf_counter() - start, 2),
+    )
+    return result

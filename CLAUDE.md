@@ -46,9 +46,10 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
 | `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
 | `integrations/laravel-ipc/` | Bundle kode SISI LARAVEL (bukan Python) untuk `ipc_app` (`C:\laragon\www\new_trial_validation_app\ipc_app`, Laravel 12 + Inertia React): `files/` = mirror root `ipc_app` (semua file baru, tinggal copy), `README.md` = langkah integrasi + 3 edit manual. Di sinilah keputusan PASS/FAIL/REVIEW dibuat (`VisionEvaluator`), EXP = MFD + `master_products.shelf_life_months`, dan audit `ipc_logs`. Ditambahkan 2026-09-28, lihat status log |
-| `llm_extract.py` | Ekstraksi via LLM (Ollama, vision) untuk field_type dokumen: `analyze_label_bulk()` (tahap 1 Startup AI Cross-Check; `im_document` menyusul). Plain import sibling `main.py`. Belum didaftarkan di `main.py`/`/api/analyze`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`, dst) — lihat gotcha #19 |
+| `llm_extract.py` | Ekstraksi via LLM (Ollama, vision): `analyze_label_bulk()`, `analyze_im_document()`, `analyze_coding_print()` (coding NON-TUBE, gotcha #20). Plain import sibling `main.py`, didaftarkan lewat `LLM_FIELD_TYPES` di `main.py`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`/`IM_VIEW_SIDES`/`CODING_VIEW_SIDES`, dst) — lihat gotcha #19 |
 | `tools/evaluate_label_bulk.py` | Evaluasi akurasi per field + kecepatan `label_bulk` vs kunci jawaban (`tools/eval_data/label_bulk_truth.json`, `--truth` untuk file lain). Membedakan WRONG_CONFIDENT (lolos gerbang tapi salah = berbahaya) dari salah-tapi-ter-flag |
-| `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json` |
+| `tools/evaluate_coding_print.py` | Evaluasi `coding_print`. `--truth` menerima kunci bacaan foto (`batch`/`exp`) ATAU kunci data DB (`db_batch`/`db_exp_*`; OK yang beda DB = `OK_BEDA_DB_CEK_VISUAL`, wajib dicek mata, karena coding bisa memang beda dari DB) |
+| `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json`, `coding_print/` (foto coding, nama = `ipc_attachments.id`; `_set2_db.json` = kunci DB set 2), `coding_print_truth.json` (kunci bacaan foto set 1) |
 | `images/` | Sample foto testing (di-commit, jadi fixture tetap) |
 | `models/` | Model weights (YOLO tube detector `tube_detector_v1/best.pt`) |
 | `logs/` | Log runtime (`fallback_cases.jsonl`) — gitignored, regenerated |
@@ -605,6 +606,53 @@ Endpoint `main.py`:
       API key Roboflow plaintext, belum pernah di-commit → jangan di-commit
       sebelum key dihapus/di-rotate.
 
+20. **`coding_print` — coding NON-TUBE (batch + EXP tercetak di kotak/jar/tutup/
+    botol/label), 2026-11-11.** LLM Ollama `qwen3.8:27b`, tanpa training.
+    - **Sumber foto uji**: DB `ipc_system` (MySQL Laragon lokal, root tanpa
+      password, SELECT saja) tabel `ipc_attachments`, `field_label` IN
+      (`coding`, `coding_primary`, `coding_secondary`, `primary_coding_batch_exp`,
+      `secondary_coding_batch_exp`); file di `C:\Users\cosmax\Downloads\ipc-attachments\{batch}\{stage}\`.
+      Nama file di-hash, jenis foto HANYA dari DB. `startup_checks.coding_format_*`
+      = format coding yang diketik operator (contoh "Batch / EXP DDMMYY XX",
+      XX = inisial LL & IPC). Folder "coding" banyak berisi tube tampak depan,
+      formulir tulisan tangan, frame hitam → wajar jadi LOW.
+    - **Format yang ditemui**: `OKB EXP 231029 CW`; 2 baris (`AKB` / `EXP 191029 QW`);
+      `BATCH : BKB` / `EXP DATE : 301029`; `BN :BKB / MFG :10/2026 / EXP :04/2029`
+      (jebakan MFG); Lip Coat `AKB EXP 10 2029 GK` (bulan-tahun). Kontrak:
+      `batch_raw`, `exp_raw` (apa adanya), `exp_suffix`, `exp_format`
+      (`DDMMYY`/`MM_YYYY`/`UNKNOWN`), `exp_parts` (potongan string, TANPA
+      konversi), `packaging_type` (flag saja, lihat bawah), `read_via`, `rescue`.
+      `MM_YYYY` → ipc_app membandingkan bulan+tahun saja.
+    - **Alur**: (1) konsensus 4 ukuran seluruh foto; (2) HANYA bila (1) tidak OK:
+      Qwen menunjuk kotak coding → crop + baca ulang konsensus 4 ukuran; hasil
+      crop dipakai hanya bila nilai yang sama persis sudah muncul utuh di salah
+      satu view tahap (1). OK tahap (1) tidak pernah diubah.
+    - **Kenapa konsensus SEMUA view, bukan mayoritas**: foto 3044 → 3 dari 4 view
+      membaca 151029, yang benar 151028.
+    - **`packaging_type` (tube/non_tube/unknown) hanya FLAG, tidak memilih
+      jalur** (keputusan user 2026-11-11, prinsip field_type dari luar tetap).
+      YOLO tube detector TIDAK bisa membedakan tube vs non-tube (cuma 1 kelas;
+      jar putih dapat 0.93-0.95). Qwen: 56 benar, 10 unknown, 0 salah (76 foto).
+      User sempat mengira Ollama "punya memori/belajar": TIDAK — tiap request
+      dari nol; "mengajari" = ubah prompt lalu ukur ulang.
+    - **Hasil ukur**: set 1 (76 foto, kunci bacaan foto) 44 OK semua benar,
+      0 false OK, 18 MM_YYYY OK. Set 2 (200 foto baru, kunci DB) 100 OK: 90 cocok
+      DB, 8 beda DB tapi DICEK MATA coding memang beda/DB tanpa huruf (coding ≠
+      DB nyata: 6299/6300 291029 vs DB 291129, 418 300928 vs 300929, 3279, 5393,
+      4850 CKB vs DB CJB, 3585 LKB vs AKB), 2 TIDAK BISA DIPASTIKAN: 2468
+      (label thermal buram, baca 181029, DB 151029) dan 847 (label jelas
+      081029, DB 061029, kemungkinan label memang salah cetak). ~7 dtk/foto,
+      ~14 dtk bila rescue.
+    - **Batas yang belum terpecahkan**: konsensus hanya menangkap tebakan yang
+      BERUBAH antar ukuran; salah baca konsisten (5/6→8 di label buram) lolos.
+      Dicoba & DIBATALKAN: (a) verifikasi "karakter mana yang meragukan" ke Qwen
+      → dua kasus tetap lolos; (b) gerbang tinggi teks px → tidak memisahkan
+      (758 lebih kecil tapi benar). Akar masalah: 139/144 foto 480x640 (ipc_app
+      mengecilkan saat unggah) → rekomendasi: unggah resolusi lebih tinggi.
+      Catatan KPI: salah baca jadi "beda dari diharapkan" = false FAIL/REVIEW;
+      false PASS hanya bila salah baca kebetulan sama persis dengan nilai yang
+      diharapkan.
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -880,6 +928,14 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       gotcha #19): `label_bulk` + `im_document` terdaftar di `main.py`
       (35 foto masing-masing, 0 false OK; label_bulk 17 OK, IM 10 OK),
       `tube_batch_code`, halaman `/startup-check`. Belum di-commit.
+- [x] `coding_print` non-tube (2026-11-11, gotcha #20): `llm_extract.analyze_coding_print`,
+      terdaftar di `main.py`, slot 5 di `/startup-check` (kolom manual tetap
+      cadangan), `tools/evaluate_coding_print.py`. Belum di-commit.
+- [ ] `coding_print` sisa: user cek item `_verify` di `coding_print_truth.json`
+      + 2 foto tak pasti (2468, 847); resolusi unggah foto di ipc_app SUDAH
+      dinaikkan (2026-11-11, ipc_app commit `99a0db3`: kamera ideal 1920x1080,
+      simpan maks 1600 px, JPEG 0.85) — belum dicek di tablet nyata; daftarkan
+      di `ipc_app/config/vision.php`
 - [ ] Startup AI Cross-Check sisa: putuskan view 640 px, user cek 2 item
       `_verify`, selidiki 5 foto WhatsApp ERROR, kunci jawaban IM lebih
       banyak, daftar field_type baru di `ipc_app/config/vision.php`

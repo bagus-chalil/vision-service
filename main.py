@@ -241,6 +241,11 @@ LLM_FIELD_TYPES = {
         "description": "Nomor IM + umur simpan per kemasan (teks asli, tahun/bulan apa adanya) dibaca LLM (Ollama GPU)",
         "fn": llm_extract.analyze_im_document,
     },
+    "coding_print": {
+        "label": "Coding non-tube (batch + EXP)",
+        "description": "Batch + EXP tercetak di kotak/jar/tutup/botol dibaca LLM (Ollama GPU); EXP DDMMYY atau bulan-tahun apa adanya, packaging_type hanya flag",
+        "fn": llm_extract.analyze_coding_print,
+    },
 }
 
 
