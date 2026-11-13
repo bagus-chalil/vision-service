@@ -1087,6 +1087,16 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       `VISION_API_KEY` opsional (header `X-API-Key` untuk /api/* kecuali health; halaman uji tidak dijaga). Jalur lama
       systemd/VM 104 (`ops/*.sh`, `vps-aiocr`) tidak dipakai lagi oleh CI. Prasyarat server: `/etc/vision-service/production.env`
       (`OLLAMA_URL=http://100.100.160.26:11434`), Ollama .26 terjangkau dari .151, runner `server105` aktif untuk project ini.
+- [x] Deploy ke server .151 SUKSES (2026-11-13): VM 105 (dev-apps, bersama VendorHub) 4 vCPU/6 GB, CPU type host; runner group
+      `server105`; Vision Service di `http://100.100.160.151:8083`. **Jalur Ollama dari .151 ke .26:** container `ollama`
+      TIDAK diubah (publish tetap `127.0.0.1:11434`, ufw di .26 inactive). Ditambah container `ollama-lan-proxy`
+      (`alpine/socat`, `--network host`, `tcp-listen:11434,bind=100.100.160.26 -> 127.0.0.1:11434`, restart unless-stopped) +
+      aturan `iptables -I INPUT -p tcp -d 100.100.160.26 --dport 11434 ! -s 100.100.160.151 -j DROP` (disimpan via
+      `iptables-persistent`). Rollback: `docker rm -f ollama-lan-proxy` + hapus aturan itu. Terowongan SSH laptop tetap
+      dipakai untuk eksperimen (`127.0.0.1:11434`). **Jebakan:** (a) `ufw` TIDAK membatasi port yang dipublish Docker
+      (iptables Docker mendahului ufw); (b) aturan INPUT TANPA `-d <ip LAN>` ikut men-DROP loopback (sumber 127.0.0.1 != .151)
+      sehingga proxy->Ollama dan terowongan SSH mati, gejalanya timeout (bukan ditolak) - selalu sertakan `-d`;
+      (c) di PowerShell `curl` = Invoke-WebRequest, pakai `curl.exe`.
 - [ ] **Akurasi tube masih rendah (±6%)** — penghambat = garis hitam menimpa satu digit
       crimp (gotcha #22), bukan resolusi. Opsi: panduan foto ulang, kebijakan REVIEW di
       ipc_app, ukur PaddleOCR (`tube_exp_date`) di server, uji kurangi view/paralel
