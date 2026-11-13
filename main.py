@@ -17,6 +17,7 @@ Run with:  uvicorn main:app --reload --port 8000
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,9 +26,8 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from paddleocr import PaddleOCR
 
 import llm_extract
 import tube_emboss_pipeline
@@ -60,6 +60,22 @@ else:
         "specific frontend origin(s) and restrict port access at the firewall."
     )
 
+# API key opsional (stopgap pilot, BUKAN auth final): bila VISION_API_KEY diset, semua
+# /api/* kecuali /api/health wajib header X-API-Key yang sama. Kosong = tanpa auth
+# (perilaku lama). Halaman uji (/, /startup-check) tidak ikut dijaga; batasi lewat firewall.
+VISION_API_KEY = os.environ.get("VISION_API_KEY", "").strip()
+
+
+@app.middleware("http")
+async def _api_key_guard(request, call_next):
+    path = request.url.path
+    if (VISION_API_KEY and path.startswith("/api/") and path != "/api/health"
+            and request.method != "OPTIONS"
+            and request.headers.get("x-api-key") != VISION_API_KEY):
+        return JSONResponse(status_code=401, content={"status": "ERROR", "error": "X-API-Key tidak valid."})
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -67,18 +83,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# LOAD_PADDLEOCR (default aktif): "0"/"false" = jangan muat PaddleOCR (hemat ~1-1,5 GB
+# RAM). Jalur LLM (label_bulk, im_document, coding_print, tube_exp_llm) tidak butuh
+# PaddleOCR; field_type jalur OCR (generic + tube_emboss) dijawab 503 bila dimatikan.
+LOAD_PADDLEOCR = os.environ.get("LOAD_PADDLEOCR", "1").strip().lower() not in ("0", "false", "no", "off")
+
 # Loaded once at startup and reused across requests (model load is slow).
 # enable_mkldnn=False works around a oneDNN crash
 # (NotImplementedError: ConvertPirAttribute2RuntimeAttribute ...) seen on this
 # machine with paddlepaddle 3.3.1 + paddleocr 3.7.0 on CPU inference.
-print("Loading PaddleOCR model, please wait...")
-ocr_engine = PaddleOCR(
-    use_doc_orientation_classify=False,
-    use_doc_unwarping=False,
-    use_textline_orientation=True,
-    enable_mkldnn=False,
-)
-print("PaddleOCR ready.")
+ocr_engine = None
+if LOAD_PADDLEOCR:
+    from paddleocr import PaddleOCR
+
+    print("Loading PaddleOCR model, please wait...")
+    ocr_engine = PaddleOCR(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
+        enable_mkldnn=False,
+    )
+    print("PaddleOCR ready.")
+else:
+    print("LOAD_PADDLEOCR=0 - PaddleOCR TIDAK dimuat; hanya jalur LLM yang tersedia.")
+
+# PaddleOCR (dan YOLO di jalur tube_emboss) tidak dijamin aman dipanggil paralel dari
+# threadpool -> satu kunci untuk seluruh jalur OCR. Perilaku antrean sama seperti
+# sebelumnya (satu request OCR sekali jalan), tetapi event loop tidak lagi tertahan
+# (health check dan request jalur LLM tetap jalan selama OCR berlangsung).
+_OCR_LOCK = threading.Lock()
+
+
+def _locked(fn, *args, **kwargs):
+    with _OCR_LOCK:
+        return fn(*args, **kwargs)
+
+
+async def run_ocr_path(fn, *args, **kwargs):
+    """Jalankan pipeline OCR di threadpool (satu per satu). 503 bila PaddleOCR dimatikan."""
+    if ocr_engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "ERROR", "error": "PaddleOCR dimatikan di server ini (LOAD_PADDLEOCR=0); field_type ini butuh PaddleOCR."},
+        )
+    return await run_in_threadpool(_locked, fn, *args, **kwargs)
+
 
 # Tube emboss sub-pipeline: YOLO11n tube detector, loaded once and reused
 # (same reasoning as ocr_engine above - reused across requests, not
@@ -354,12 +403,13 @@ async def analyze(
     if field_type in LLM_FIELD_TYPES:
         # LLM jalur (Ollama GPU). Panggilan HTTP-nya blocking dan lama (beberapa
         # detik), jadi dilempar ke threadpool supaya event loop tidak tertahan
-        # (lihat gotcha #16 - jalur OCR lama sengaja tidak diubah).
+        # (gotcha #16; jalur OCR kini juga di threadpool lewat run_ocr_path).
         return await run_in_threadpool(run_llm_pipeline, image, field_type, request_id or str(uuid.uuid4()))
 
     is_tube_emboss = bool(field_type) and field_type in tube_emboss_pipeline.load_emboss_format_patterns()
     if is_tube_emboss:
-        return run_tube_emboss_pipeline(
+        return await run_ocr_path(
+            run_tube_emboss_pipeline,
             image,
             field_type=field_type,
             request_id=request_id or str(uuid.uuid4()),
@@ -367,7 +417,7 @@ async def analyze(
             image_ref=file.filename or "unknown",
             reference_date=reference_date,
         )
-    return run_generic_pipeline(image, field_type)
+    return await run_ocr_path(run_generic_pipeline, image, field_type)
 
 
 @app.get("/api/tube-emboss/field-types")
@@ -395,7 +445,7 @@ async def run_ocr(file: UploadFile = File(...), field_type: str = Form(None)):
     if image is None:
         return DECODE_ERROR
 
-    return run_generic_pipeline(image, field_type)
+    return await run_ocr_path(run_generic_pipeline, image, field_type)
 
 
 @app.post("/api/tube-emboss/analyze")
@@ -417,7 +467,8 @@ async def tube_emboss_analyze(
     if image is None:
         return DECODE_ERROR
 
-    return run_tube_emboss_pipeline(
+    return await run_ocr_path(
+        run_tube_emboss_pipeline,
         image,
         field_type=field_type or tube_emboss_pipeline.DEFAULT_FIELD_TYPE,
         request_id=request_id,

@@ -1078,6 +1078,15 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
 - [x] Kecepatan `tube_exp_llm` + ukur PaddleOCR di set tube (2026-11-13, gotcha #23): 2 view dan paralel
       ditolak (false OK / tidak lebih cepat); PaddleOCR 18 OK tapi 5 false OK -> bukan penentu. Env
       `TUBE_EXP_VIEW_SIDES`/`TUBE_EXP_PARALLEL` ditambah (default tidak berubah). Belum di-commit.
+- [x] Persiapan deploy ke server .151 (2026-11-13, BELUM di-commit/deploy/diuji build): `Dockerfile` (python:3.11-slim,
+      libgl1, model PaddleOCR diunduh saat build), `.dockerignore`, `docker-compose.prod.yml` (port 8083, env file
+      `VISION_ENV_FILE`, `mem_limit` 5g), `.gitlab-ci.yml` ditulis ulang (runner tag `server105`, rsync ke
+      `VISION_DEPLOY_PATH`, build -> `up --wait` -> smoke curl; variabel CI: `VISION_DEPLOY_PATH`, `VISION_PORT`,
+      `VISION_ENV_FILE`). `main.py`: env `LOAD_PADDLEOCR` (default 1; 0 = PaddleOCR tidak dimuat, jalur OCR -> 503),
+      jalur OCR kini lewat threadpool + satu kunci `_OCR_LOCK` (antrean tetap serial, event loop bebas), env
+      `VISION_API_KEY` opsional (header `X-API-Key` untuk /api/* kecuali health; halaman uji tidak dijaga). Jalur lama
+      systemd/VM 104 (`ops/*.sh`, `vps-aiocr`) tidak dipakai lagi oleh CI. Prasyarat server: `/etc/vision-service/production.env`
+      (`OLLAMA_URL=http://100.100.160.26:11434`), Ollama .26 terjangkau dari .151, runner `server105` aktif untuk project ini.
 - [ ] **Akurasi tube masih rendah (±6%)** — penghambat = garis hitam menimpa satu digit
       crimp (gotcha #22), bukan resolusi. Opsi: panduan foto ulang, kebijakan REVIEW di
       ipc_app, ukur PaddleOCR (`tube_exp_date`) di server, uji kurangi view/paralel

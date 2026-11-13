@@ -1,0 +1,22 @@
+# Compose Vision Service untuk server .151 (dipakai pipeline GitLab, pola VendorHub).
+# Satu service, stateless. Rahasia/konfigurasi dari env file di server (VISION_ENV_FILE),
+# di luar repo. Variabel yang diekspor pipeline: VISION_ENV_FILE, VISION_PORT.
+# Perintah manual: COMPOSE_PROJECT_NAME=vision-service-production docker compose -f docker-compose.prod.yml up -d --build
+services:
+  vision:
+    image: vision-service:${COMPOSE_PROJECT_NAME:-vision-service}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # OLLAMA_URL (server .26), LOAD_PADDLEOCR, VISION_API_KEY, VISION_SERVICE_ALLOWED_ORIGINS, OLLAMA_MODEL, dst.
+    env_file: ${VISION_ENV_FILE}
+    ports:
+      - "${VISION_PORT:-8083}:8000"
+    # Batas memori (isi sesuai hasil `docker stats`; estimasi awal ~4 GB dengan PaddleOCR).
+    mem_limit: ${VISION_MEM_LIMIT:-5g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

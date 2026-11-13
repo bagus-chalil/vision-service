@@ -1,40 +1,58 @@
-# CI/CD for the Vision Service pilot VPS.
+# CI/CD Vision Service ke server .151 (pola VendorHub: Docker Compose + runner shell tag server105).
+# GitHub = sumber; .github/workflows/mirror-to-gitlab.yml push-mirror branch `production` ke GitLab.
+# Pipeline HANYA untuk branch production. Alur: validasi sintaks -> rsync ke DEPLOY_PATH ->
+# docker compose build -> up -d --wait (healthcheck = model sudah termuat) -> smoke test API.
+# Bila build/healthcheck gagal, container lama tetap berjalan (compose tidak mengganti
+# container sebelum image baru berhasil di-build; up --wait gagal = job merah).
 #
-# GitHub stays the source of truth (see .github/workflows/mirror-to-gitlab.yml
-# in the mirrored repo) - this pipeline only runs for the 'production' branch,
-# which exists ONLY to drive this pilot deploy (not a day-to-day dev branch).
-# Both stages run on the single self-hosted runner registered directly on
-# the pilot VPS itself (tag: vps-aiocr, see ops/provision_vps.sh) - there is
-# no other runner in this project.
-# "validate" is a cheap syntax/config sanity check using whatever python3 the
-# runner's OS ships (no venv, no heavy deps - just stdlib). "deploy" is where
-# the real smoke test happens, INSIDE the freshly-installed venv, before the
-# running service is ever touched (see ops/deploy.sh).
+# Variabel CI/CD (Settings > CI/CD > Variables, atau grup):
+#   VISION_DEPLOY_PATH  mis. /var/www/vision-service
+#   VISION_PORT         mis. 8083
+#   VISION_ENV_FILE     mis. /etc/vision-service/production.env  (dibuat MANUAL di server, 640 root:gitlab-runner)
+# Contoh isi env file: OLLAMA_URL=http://100.100.160.26:11434 ; OLLAMA_MODEL=qwen3.8:27b ;
+#   LOAD_PADDLEOCR=1 ; VISION_API_KEY=<rahasia, opsional> ; VISION_SERVICE_ALLOWED_ORIGINS=...
 
 stages:
   - validate
   - deploy
 
-validate:
-  stage: validate
-  tags: [vps-aiocr]
+workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == "production"'
+
+validate:
+  stage: validate
+  tags: [server105]
   script:
-    - python3 -m py_compile main.py tube_emboss_pipeline.py
+    - python3 -m py_compile main.py tube_emboss_pipeline.py llm_extract.py
     - python3 -c "import json; json.load(open('field_patterns.json'))"
     - python3 -c "import json; json.load(open('emboss_format_patterns.json'))"
 
-deploy:
+deploy_production:
   stage: deploy
-  tags: [vps-aiocr]
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "production"'
+  tags: [server105]
+  resource_group: production
   environment:
-    name: pilot-vps
+    name: production
   script:
-    # The only privileged command this job is allowed to run at all - see
-    # /etc/sudoers.d/vision-service-deploy (installed by provision_vps.sh).
-    # $CI_PROJECT_DIR is the fresh checkout the shell executor already made
-    # for this job.
-    - sudo /usr/local/bin/vision-service-deploy.sh "$CI_PROJECT_DIR"
+    - test -n "$VISION_DEPLOY_PATH" || (echo "VISION_DEPLOY_PATH belum diset" && exit 1)
+    - test -n "$VISION_PORT" || (echo "VISION_PORT belum diset" && exit 1)
+    - test -n "$VISION_ENV_FILE" || (echo "VISION_ENV_FILE belum diset" && exit 1)
+    - test -f "$VISION_ENV_FILE" || (echo "$VISION_ENV_FILE tidak ada - buat manual dulu" && exit 1)
+    - mkdir -p "$VISION_DEPLOY_PATH"
+    - >
+      rsync -a --no-owner --no-group --delete-after
+      --exclude='.git/' --exclude='.github/' --exclude='.gitlab-ci.yml'
+      --exclude='venv/' --exclude='testdata_private/' --exclude='debug_output/' --exclude='logs/'
+      --exclude='.env'
+      "$CI_PROJECT_DIR/" "$VISION_DEPLOY_PATH/"
+    - cd "$VISION_DEPLOY_PATH"
+    - export COMPOSE_PROJECT_NAME=vision-service-production
+    - export COMPOSE_FILE=docker-compose.prod.yml
+    - docker compose build
+    - docker compose up -d --remove-orphans --wait --wait-timeout 300
+    # Smoke test: health + katalog field_type (membuktikan app + config terbaca).
+    - curl -fsS "http://localhost:$VISION_PORT/api/health"
+    - curl -fsS "http://localhost:$VISION_PORT/api/field-types" > /dev/null
+    - docker image prune -f
+    - echo "Deployed $CI_COMMIT_SHORT_SHA ke $VISION_DEPLOY_PATH di port $VISION_PORT"
