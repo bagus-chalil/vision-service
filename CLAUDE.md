@@ -757,6 +757,17 @@ Endpoint `main.py`:
       tampak memproses serial) dan LOW malah 2x lebih lambat karena early-stop antar sumber hilang;
       status identik dengan sekuensial. Kasus LOW (94% foto) sudah cepat (median 2,6 dtk) - biaya ada di
       kasus OK (16 panggilan). Hold-out, konfigurasi default: 0 OK, 0 false OK, median 2,6 / mean 2,8 dtk.
+    - **Varian 3 view (set lama, workers=1):** tanpa 640 (1024,1600,2048) = 14 OK, **false OK 3948 lagi**
+      (view 640 px = penangkapnya, jangan dibuang); tanpa 1600 (1024,640,2048) = 12 OK (+6778 benar), 0
+      false, waktu OK 19,6 dtk; tanpa 2048 (1024,640,1600) = 12 OK (+2308 benar), 0 false, waktu OK 17,3 dtk
+      (baseline 24,3). Rata-rata keseluruhan tetap ±5 dtk (hanya ±6% foto kena kasus OK). `1024,640,1600`
+      KANDIDAT (env `TUBE_EXP_VIEW_SIDES`), belum default: bukti keamanan hanya dari 1 foto penentu dan 1 OK
+      baru, hold-out 0 OK tak informatif. Validasi di foto nyata ipc_app sebelum dijadikan default.
+    - **Server Ollama (.26) = DOCKER** (`ollama/ollama:0.40.13`), bukan systemd. Env: KEEP_ALIVE=10m,
+      FLASH_ATTENTION=1, KV_CACHE_TYPE=q8_0, CONTEXT_LENGTH=32768, MAX_LOADED_MODELS=2, HOST=0.0.0.0:11434;
+      `OLLAMA_NUM_PARALLEL` TIDAK diset. Uji empiris lewat terowongan: 4 panggilan paralel 2,1 dtk = berurutan
+      2,2 dtk -> serial. Mengubahnya = buat ulang container dengan `-e OLLAMA_NUM_PARALLEL=2` (pastikan volume
+      model, awas memori GPU: konteks x paralel); keputusan atasan, server dipakai bersama. Belum dilakukan.
     - **Tugas 2 (PaddleOCR `tube_exp_date`, jalur label_anchor)**: set lama 15 OK (9 cocok DB, 6 beda DB)
       + hold-out 3 OK (semua cocok DB). Waktu median 5,8 / mean 7,0 / p90 12 dtk di laptop CPU (LLM
       default: 2,6 / 5,0 / 10,9 dtk; kasus OK LLM 26 dtk). **Cek visual 6 OK beda DB set lama:** 4277
