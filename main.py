@@ -230,7 +230,26 @@ def run_tube_emboss_pipeline(image, field_type, request_id, debug, image_ref, re
     return result
 
 
+def analyze_tube_exp_llm(image):
+    """tube_exp_llm: Python (YOLO) memotong crop crimp, Ollama hanya mentranskripsi tiap
+    crop, aturan sepakat 3-dari-4 ada di llm_extract.analyze_tube_exp. Tidak ada PaddleOCR.
+    Tidak ada tube terdeteksi -> LOW_CONFIDENCE tanpa memanggil LLM."""
+    crops = tube_emboss_pipeline.tube_exp_crops(image, tube_yolo_model)
+    if not crops["detected"]:
+        result = llm_extract.analyze_tube_exp(image, [])
+        result.update(tube_detected=False, yolo_reason=crops.get("reason"))
+        return result
+    result = llm_extract.analyze_tube_exp(image, crops["crops"])
+    result.update(tube_detected=True, tube_bbox=crops["bbox"], yolo_confidence=crops["confidence"])
+    return result
+
+
 LLM_FIELD_TYPES = {
+    "tube_exp_llm": {
+        "label": "Tube EXP (LLM, crop YOLO)",
+        "description": "EXP emboss crimp tube: YOLO crop (Python) + transkripsi LLM (Ollama GPU), OK hanya bila >=3 dari 4 sumber sepakat. Tanpa PaddleOCR.",
+        "fn": analyze_tube_exp_llm,
+    },
     "label_bulk": {
         "label": "Label Bulk",
         "description": "No Batch + Mixing Date + Kode Bulk dibaca LLM (Ollama GPU), konsensus multi-ukuran",

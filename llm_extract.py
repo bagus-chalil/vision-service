@@ -15,7 +15,10 @@ Design rules (see CLAUDE.md + docs/startup-ai-crosscheck-plan.md):
     OLLAMA_TIMEOUT        default 120    (seconds, per attempt)
     LABEL_VIEW_SIDES      default 1024,640,1600,2048 (image sizes = views; all must agree)
     IM_VIEW_SIDES / CODING_VIEW_SIDES  per-field override, fallback LABEL_VIEW_SIDES
-    OLLAMA_NUM_CTX        default 8192
+    OLLAMA_NUM_CTX        default KOSONG = tidak dikirim, server yang menentukan (server .26:
+                          OLLAMA_CONTEXT_LENGTH=32768). Isi hanya bila ingin memaksa. Dulu 8192;
+                          dihapus 2026-11-13 (permintaan atasan) - terukur view terbesar 2048 px
+                          hanya 3847 token, dan nilai beda dari klien lain memicu reload model.
 
 Plain import (sibling of main.py), same convention as tube_emboss_pipeline.py.
 """
@@ -42,7 +45,7 @@ def _cfg():
         "model": os.environ.get("OLLAMA_MODEL", "qwen3.8:27b"),
         "think": think,
         "timeout": float(os.environ.get("OLLAMA_TIMEOUT", "120")),
-        "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "8192")),
+        "num_ctx": int(os.environ["OLLAMA_NUM_CTX"]) if os.environ.get("OLLAMA_NUM_CTX", "").strip() else None,
     }
 
 
@@ -128,9 +131,11 @@ def _call_ollama(prompt, image_b64, schema, cfg):
         "stream": False,
         "think": cfg["think"],  # model default is medium -> must override
         "format": schema,  # structured output
-        "options": {"temperature": 0, "seed": 0, "num_ctx": cfg["num_ctx"]},
+        "options": {"temperature": 0, "seed": 0},
         "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
     }
+    if cfg.get("num_ctx"):  # hanya bila dipaksa lewat env; default = konteks server
+        payload["options"]["num_ctx"] = cfg["num_ctx"]
     try:
         resp = requests.post(
             f"{cfg['url']}/api/chat", json=payload, timeout=cfg["timeout"]
@@ -739,3 +744,103 @@ def analyze_coding_print(image_bgr):
         elapsed_sec=round(time.perf_counter() - start, 2),
     )
     return result
+
+
+# --------------------------------------------------------------------------
+# tube_exp_llm: EXP emboss di crimp tube (cascade beberapa crop, 3-dari-4 sepakat)
+# --------------------------------------------------------------------------
+# Pembagian tugas (diputuskan 2026-11-13 dari eksperimen di tools/tune_tube_exp.py):
+#   Python : YOLO lokalisasi + crop (tube_emboss_pipeline.tube_exp_crops), validasi
+#            DDMMYY, aturan sepakat antar-sumber. Tidak ada teks yang diputuskan/diedit.
+#   Ollama : hanya TRANSKRIPSI tiap crop (prompt coding_print yang sama).
+# Kenapa cascade: garis hitam (sensor mark) menimpa satu digit crimp. Crop lebar membuat
+# model MENEBAK digit di bawah garis secara konsisten di semua view, jadi konsensus view
+# saja tidak menangkapnya. Tebakan seperti itu terukur muncul di SATU skala crop saja
+# (2267: 101029 vs DB 161029; 6993: 201031 vs DB 291031), sedangkan bacaan yang sama dari
+# >=3 sumber independen (tube utuh, 50%, 30%, foto utuh) cocok DB / benar saat dicek mata.
+# Aturan: OK hanya bila >=3 dari 4 sumber 'trusted' (semua view sepakat+legible+DDMMYY)
+# bernilai SAMA dan tidak ada sumber trusted lain yang bernilai beda. Kasus LOW berhenti
+# setelah 2 sumber gagal (3 sepakat tak mungkin lagi) -> hemat panggilan.
+# Batas yang diketahui: terukur 175 foto (10 OK, 0 false OK terlihat) + 19 foto hold-out
+# (0 OK); sampel kecil. OK di sini BUKAN bukti kuat: satu posisi di bawah garis tetap
+# bisa tak terverifikasi - kebijakan toleransi/REVIEW ada di ipc_app.
+
+TUBE_EXP_MIN_AGREE = 3
+
+
+def _read_exp_source(name, crop, cfg):
+    """One source = one crop read at every view size, stopping at the first view that
+    cannot lead to a trusted value (identical outcome, fewer LLM calls)."""
+    views = []
+    for side in _view_sides("CODING_VIEW_SIDES"):
+        data, _, _ = _extract_with_retry(
+            CODING_PROMPT, _encode_image(crop, side), CODING_SCHEMA, cfg, _validate_coding
+        )
+        views.append({"exp": data["exp"], "legible": bool(data["legible"]["exp"])})
+        v0 = (views[0]["exp"] or "").strip() or None
+        v = (data["exp"] or "").strip() or None
+        if v is None or not views[-1]["legible"] or v != v0:
+            break
+    first = (views[0]["exp"] or "").strip() or None
+    trusted = (
+        len(views) == len(_view_sides("CODING_VIEW_SIDES"))
+        and first is not None
+        and bool(CODING_EXP_DDMMYY.match(first))
+        and all(((x["exp"] or "").strip() or None) == first and x["legible"] for x in views)
+    )
+    return {"source": name, "exp": first, "trusted": trusted,
+            "views_exp": [x["exp"] for x in views], "n_views": len(views)}
+
+
+def analyze_tube_exp(image_bgr, crops):
+    """tube_exp_llm contract: EXP DDMMYY of a tube crimp. `crops` = list of
+    (name, crop) from tube_emboss_pipeline.tube_exp_crops(); the whole photo is
+    always the last source. Raw transcription only - no PASS/FAIL, never edits a value."""
+    cfg = _cfg()
+    start = time.perf_counter()
+    sources = list(crops) + [("full_photo", image_bgr)]
+    need = TUBE_EXP_MIN_AGREE
+    reads, fails = [], 0
+    try:
+        if len(sources) < need:  # YOLO tidak menemukan tube -> 3 sumber mustahil, tidak perlu memanggil LLM
+            pass
+        else:
+            for name, img in sources:
+                r = _read_exp_source(name, img, cfg)
+                reads.append(r)
+                if not r["trusted"]:
+                    fails += 1
+                    if len(sources) - fails < need:  # 3 sepakat sudah mustahil
+                        break
+    except LlmUnavailable as exc:
+        return _error_result("tube_exp_llm", f"LLM_UNAVAILABLE: {exc}", time.perf_counter() - start)
+    except LlmBadJson as exc:
+        return _error_result("tube_exp_llm", f"LLM_BAD_JSON: {exc}", time.perf_counter() - start)
+
+    trusted_vals = [r["exp"] for r in reads if r["trusted"]]
+    agreed = None
+    if trusted_vals:
+        top = max(set(trusted_vals), key=trusted_vals.count)
+        if trusted_vals.count(top) >= need and len(set(trusted_vals)) == 1:
+            agreed = top
+    first_reads = [r["exp"] for r in reads if r["exp"]]
+    exp_raw = agreed or (max(set(first_reads), key=first_reads.count) if first_reads else None)
+    exp_format, exp_parts = coding_exp_format(exp_raw)
+    ok = agreed is not None
+    return {
+        "exp_raw": exp_raw,
+        "exp_format": exp_format,
+        "exp_parts": exp_parts,
+        "format_ok": {"exp": exp_format == "DDMMYY"},
+        "trusted_sources": len(trusted_vals),
+        "sources_read": len(reads),
+        "sources_total": len(sources),
+        "sources": reads,
+        "read_via": "cascade_3of4",
+        "status": "OK" if ok else "LOW_CONFIDENCE",
+        # NOT a calibrated probability: routing signal only.
+        "confidence": 0.95 if ok else (0.5 if trusted_vals else 0.2),
+        "engine_used": "ollama",
+        "model": cfg["model"],
+        "elapsed_sec": round(time.perf_counter() - start, 2),
+    }

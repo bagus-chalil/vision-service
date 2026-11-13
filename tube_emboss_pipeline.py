@@ -39,6 +39,7 @@ text + confidence + status/flags. That decision lives in Laravel.
 import base64
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -164,6 +165,32 @@ def localize_tube(image_bgr, yolo_model, min_confidence: float = YOLO_MIN_CONFID
         "tube_crop": tube_crop,
         "crimp_crop": crimp_crop,
     }
+
+
+# Pecahan tinggi bbox tube (dari atas) untuk jalur tube_exp_llm. Diukur 2026-11-13:
+# crop terlalu sempit (15% ~ 57 px) tidak terbaca, 30/50/100% saling melengkapi.
+EXP_LLM_CROP_FRACTIONS = (("tube_full", 1.0), ("top50", 0.50), ("top30", 0.30))
+
+# YOLO (ultralytics) tidak aman dipanggil paralel dari beberapa thread; jalur LLM
+# berjalan di threadpool, jadi panggilan predict diserialkan.
+_YOLO_LOCK = threading.Lock()
+
+
+def tube_exp_crops(image_bgr, yolo_model) -> dict:
+    """Python-side step of the tube_exp_llm path: localize the tube (YOLO) and cut
+    the crops the LLM will read. Pure geometry - no text is read or decided here.
+    Returns {"detected": False, "reason": ...} or
+    {"detected": True, "confidence": float, "bbox": [...], "crops": [(name, crop), ...]}."""
+    with _YOLO_LOCK:
+        loc = localize_tube(image_bgr, yolo_model)
+    if not loc.get("detected"):
+        return {"detected": False, "reason": loc.get("reason"), "confidence": loc.get("confidence")}
+    tube = loc["tube_crop"]
+    crops = []
+    for name, frac in EXP_LLM_CROP_FRACTIONS:
+        h = tube.shape[0] if frac >= 1.0 else max(1, int(tube.shape[0] * frac))
+        crops.append((name, tube[:h, :]))
+    return {"detected": True, "confidence": loc["confidence"], "bbox": loc["bbox"], "crops": crops}
 
 
 # Only upscale inputs shorter than this (px) - see preprocess_crimp_for_ocr().

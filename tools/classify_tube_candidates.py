@@ -38,7 +38,17 @@ items = []
 for r in rows:
     i, st, fl, fp, nb, ex, nm = r.split("\t")
     items.append(dict(id=int(i), stage=st, label=fl, path=str(SRC / fp), db_no_batch=nb, db_exp=ex, product=nm))
-done = {x["id"]: x for x in json.loads(OUT.read_text(encoding="utf-8"))} if OUT.exists() else {}
+# Hasil ditulis ke classify_v2.json (classify.json DIBACA saja, jadi eksperimen yang
+# memakainya tidak terganggu). Entri berisi "error" (mis. unreadable karena file waktu itu
+# belum ada, atau terowongan putus) dianggap belum selesai dan dicoba ulang.
+OLD = OUT
+OUT = OLD.with_name("classify_v2.json")
+done = {}
+for _src in (OLD, OUT):
+    if _src.exists():
+        for x in json.loads(_src.read_text(encoding="utf-8")):
+            if not x.get("error"):
+                done[x["id"]] = x
 cfg = L._cfg()
 
 def work(it):

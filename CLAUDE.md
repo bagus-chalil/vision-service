@@ -46,7 +46,7 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `tests/` | Script verifikasi manual: `test_ocr.py` (PaddleOCR + cv2 bisa load), `test_tube_emboss.py` (hit `/api/tube-emboss/analyze`, simpan debug crop ke `debug_output/`) |
 | `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
 | `integrations/laravel-ipc/` | Bundle kode SISI LARAVEL (bukan Python) untuk `ipc_app` (`C:\laragon\www\new_trial_validation_app\ipc_app`, Laravel 12 + Inertia React): `files/` = mirror root `ipc_app` (semua file baru, tinggal copy), `README.md` = langkah integrasi + 3 edit manual. Di sinilah keputusan PASS/FAIL/REVIEW dibuat (`VisionEvaluator`), EXP = MFD + `master_products.shelf_life_months`, dan audit `ipc_logs`. Ditambahkan 2026-09-28, lihat status log |
-| `llm_extract.py` | Ekstraksi via LLM (Ollama, vision): `analyze_label_bulk()`, `analyze_im_document()`, `analyze_coding_print()` (coding NON-TUBE, gotcha #20). Plain import sibling `main.py`, didaftarkan lewat `LLM_FIELD_TYPES` di `main.py`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`/`IM_VIEW_SIDES`/`CODING_VIEW_SIDES`, dst) — lihat gotcha #19 |
+| `llm_extract.py` | Ekstraksi via LLM (Ollama, vision): `analyze_label_bulk()`, `analyze_im_document()`, `analyze_coding_print()` (coding NON-TUBE, gotcha #20), `analyze_tube_exp()` (EXP crimp tube, cascade, gotcha #22). Plain import sibling `main.py`, didaftarkan lewat `LLM_FIELD_TYPES` di `main.py`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`/`IM_VIEW_SIDES`/`CODING_VIEW_SIDES`, dst) — lihat gotcha #19 |
 | `tools/evaluate_label_bulk.py` | Evaluasi akurasi per field + kecepatan `label_bulk` vs kunci jawaban (`tools/eval_data/label_bulk_truth.json`, `--truth` untuk file lain). Membedakan WRONG_CONFIDENT (lolos gerbang tapi salah = berbahaya) dari salah-tapi-ter-flag |
 | `tools/evaluate_coding_print.py` | Evaluasi `coding_print`. `--truth` menerima kunci bacaan foto (`batch`/`exp`) ATAU kunci data DB (`db_batch`/`db_exp_*`; OK yang beda DB = `OK_BEDA_DB_CEK_VISUAL`, wajib dicek mata, karena coding bisa memang beda dari DB) |
 | `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). Isi: `date_bulk/` (Label Bulk), `im_number/` (IM), `label_bulk_truth.json`, `coding_print/` (foto coding, nama = `ipc_attachments.id`; `_set2_db.json` = kunci DB set 2), `coding_print_truth.json` (kunci bacaan foto set 1). `tube/` (2026-11-12, `tools/extract_tube_dataset.py`): `photos/` = 405 foto `image_tube` (filling) dari DB + 36 fixture `images/`, `manifest.json` = kunci DB per foto. CATATAN: `image_tube` DB mayoritas foto produk utuh/jauh (banyak BUKAN tube, tanpa emboss terbaca) - belum dipilah. `tube/photos_candidates/` (235 foto, `tools/classify_tube_candidates.py` -> `tube/classify.json`) = foto coding packing/startup yang Qwen (1 view, penyaring awal, belum dicek penuh) nilai TUBE; 175 dengan kode emboss di crimp, 150 di antaranya ada garis hitam menimpa kode (sensor/eye mark, posisi sama di semua tube - lihat gotcha #14). Baseline 2026-11-12 (`tools/baseline_tube_exp.py`, jalur Ollama `coding_print`, 175 foto tube berkode crimp, kunci DB): 5 OK (semua cocok DB), 170 LOW, 0 false OK; garis hitam 1/128 OK vs tanpa garis 4/47 OK. `tube_exp_date` (PaddleOCR) BELUM diukur di set ini (CPU, bukan di laptop). Prototype mode topeng (`tools/proto_masked_exp.py`, model baca EXP 6 char dgn '?' tanpa diberi nilai DB, 3 view per-posisi, cocok ke DB dgn wildcard): FULL_MATCH 23, PARTIAL_CONSISTENT 42, CONFLICT 26, NO_SIGNAL 84 (dari 175). TEMUAN: model HALUSINASI di bawah garis hitam walau 3 view konsisten (mis. 7723 baca '9' di posisi tertutup) -> CONFLICT bisa konflik palsu, jangan dipakai utk FAIL; perlu deteksi garis hitam via OpenCV utk memaksa posisi di bawahnya '?' (belum dikerjakan). Detektor garis hitam OpenCV DICOBA & DIBUANG (2026-11-12): hanya menemukan 54 dari ±128 foto bergaris (garis cuma ±3 px di foto jauh, butuh lokalisasi crimp dulu) + false positive (stiker kuning, huruf logo) - flag Qwen `black_mark_over_code` justru lebih akurat di cek visual. Garis ini tercetak di crimp SEMUA tube yang dilihat, jadi kebijakan yang diusulkan: ANGGAP selalu ada, 1 posisi selalu tak terverifikasi (toleransi 1 beda -> REVIEW, bukan konflik; FULL_MATCH bukan bukti kuat). Dari 26 CONFLICT: 11 beda 1 posisi, 15 beda >=2. Prototype BELUM masuk main.py/llm_extract.py |
@@ -682,6 +682,61 @@ Endpoint `main.py`:
       "beda & sumber belum yakin -> REVIEW" (arah aman, bukan false PASS).
       Sesi baru direncanakan khusus membahas peningkatan akurasi tube.
 
+22. **`tube_exp_llm` — EXP crimp tube via YOLO crop + Ollama, cascade 3-dari-4
+    (2026-11-13).** Hasil sesi "akurasi tube". Field_type baru di `LLM_FIELD_TYPES`
+    (`main.py`, jalur threadpool, tanpa PaddleOCR). **Pembagian tugas:** Python =
+    YOLO lokalisasi + crop (`tube_emboss_pipeline.tube_exp_crops()`, dengan
+    `_YOLO_LOCK` karena YOLO tidak aman dipanggil paralel dari threadpool), validasi
+    DDMMYY, aturan sepakat; Ollama = HANYA transkripsi tiap crop (prompt `coding_print`
+    yang sama). Fungsinya `llm_extract.analyze_tube_exp()`. Tidak ada tube terdeteksi ->
+    `LOW_CONFIDENCE` tanpa memanggil LLM. Tidak pernah strip/koreksi nilai.
+    - **Aturan:** 4 sumber = crop tube utuh, 50% atas, 30% atas, foto utuh. Satu
+      sumber `trusted` bila semua view (4 ukuran) membaca nilai sama + legible +
+      DDMMYY (early-exit: berhenti di view pertama yang tak sepakat, hasil identik).
+      `OK` hanya bila >=3 sumber trusted bernilai SAMA dan tak ada sumber trusted lain
+      bernilai beda. LOW berhenti setelah 2 sumber gagal.
+    - **Kenapa cascade, bukan satu crop:** garis hitam (sensor mark) menimpa SATU digit
+      crimp. Crop lebar membuat model MENEBAK digit di bawah garis secara konsisten di
+      semua view, jadi konsensus view TIDAK menangkapnya. Dua false OK sejati ditemukan
+      (dicek mata): 2267 (`1?1029`, model 101029, DB 161029; hanya crop 50%) dan 6993
+      (`2?1031`, model 201031, DB 291031; hanya tube utuh). Keduanya muncul di SATU skala
+      saja, sedangkan semua bacaan yang sama dari >=3 sumber cocok DB atau benar saat
+      dicek mata. 2709 (`14042?`, model 140426, DB 140428) ambigu/kemungkinan salah,
+      ditolak aturan ini (hanya 2 sumber).
+    - **Hasil (fungsi final, `tools/evaluate_tube_exp_llm.py`):** 175 foto set lama:
+      11 OK (8 cocok DB, 3 beda DB tapi cetakan memang beda: 4277 cetak 210929 vs DB
+      211029; 6962/6986 cetak `301029` vs DB 301129), 0 false OK terlihat; baseline foto
+      utuh 5 OK. **Hold-out 19 foto baru (1600x900, 18/19 bergaris): 0 OK**, 0 false OK
+      -> aturan 3-dari-4 ditemukan SETELAH melihat set lama, BELUM tervalidasi (sampel
+      kecil), jangan dianggap "optimal". Waktu: median 5,1 dtk, rata-rata 10,5 dtk
+      (OK 4 sumber x 4 view bisa 25-80 dtk), kasus LOW median 5 dtk. Satu crop dengan
+      early-exit 2,2 dtk/foto tapi tidak aman (lolos tebakan di bawah garis).
+    - **Akar masalah = garis hitam, bukan resolusi:** foto baru 1600x900 (ipc_app naik
+      resolusi) tetap 0 OK. Tuning software tak akan memperbaikinya; yang membantu foto
+      ulang dengan sudut yang tak menimpa garis. OK dari jalur ini BUKAN bukti kuat
+      (satu posisi di bawah garis bisa tak terverifikasi) - kebijakan toleransi/REVIEW
+      tetap di ipc_app (VisionEvaluator). PaddleOCR (`tube_exp_date`) di set ini BELUM
+      diukur (aturan user: tak jalan di laptop, harus di server).
+    - **`num_ctx` DIHAPUS dari request Ollama (2026-11-13, permintaan atasan user).**
+      Server .26: `OLLAMA_CONTEXT_LENGTH=32768`, `MAX_LOADED_MODELS=2`, `KEEP_ALIVE=10m`,
+      flash attention + KV cache q8_0. Sebelumnya dipaksa 8192. Terukur: view terbesar
+      (2048 px) cuma 3847 token; regresi 176 foto IDENTIK (13 OK sama, 0 bacaan berubah,
+      waktu sama) -> bukan peningkatan akurasi/kecepatan, hanya menyelaraskan konteks
+      dengan klien lain (hindari reload model). `OLLAMA_NUM_CTX` env masih bisa memaksa.
+    - **Data/alat eksperimen (semua di `testdata_private/tube/`, gitignored):**
+      `classify.json` (set lama, 175 foto tube berkode crimp), `classify_v2.json`
+      (+64 foto coding baru setelah DB disinkron prod 2026-11-13 -> 19 tube berkode
+      crimp = hold-out), `tune_*.json`, `final_*.json`. Skrip: `tools/tune_tube_exp.py`
+      (sapuan crop/prompt/early-exit/paralel + waktu), `tools/experiment_tube_crop.py`
+      (eksperimen awal), `tools/evaluate_tube_exp_llm.py` (fungsi final).
+      `tools/classify_tube_candidates.py` kini menulis `classify_v2.json` (classify.json
+      hanya dibaca) dan mengulang entri `error`. Path foto di classify.json menunjuk
+      `Downloads\ipc-attachments` yang sempat hilang; salinan di `photos_candidates/`.
+    - **Jebakan:** terowongan SSH ke Ollama putus sendiri di tengah run panjang (tak
+      auto-reconnect) -> entri ERROR; skrip eksperimen kini tidak men-cache ERROR.
+      Prompt khusus crimp (tanpa "legible" longgar) terlalu ketat: hanya 5 OK vs 13.
+      Belum diuji: view paralel, kurangi view per sumber (mis. 2) untuk kecepatan.
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -963,8 +1018,15 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
 - [x] Slot Primary Coding tunggal di `/startup-check` (2026-11-12, gotcha #21):
       tube/non-tube dibedakan otomatis lewat `packaging_type` (>= 3/4 view),
       tube boleh 2 foto. Belum di-commit.
-- [ ] **Akurasi tube perlu ditingkatkan** (EXP/kode depan sering LOW_CONFIDENCE,
-      lihat gotcha #21) — dibahas di sesi baru.
+- [x] `tube_exp_llm` (2026-11-13, gotcha #22): YOLO crop (Python) + transkripsi
+      Ollama, cascade 3-dari-4 sumber; 11 OK / 175 foto (0 false OK terlihat),
+      hold-out 19 foto 0 OK; `num_ctx` dihapus. Belum di-commit, belum di-deploy,
+      belum dipakai `startup_check.html`. Aturan BELUM tervalidasi di set lebih besar.
+- [ ] **Akurasi tube masih rendah (±6%)** — penghambat = garis hitam menimpa satu digit
+      crimp (gotcha #22), bukan resolusi. Opsi: panduan foto ulang, kebijakan REVIEW di
+      ipc_app, ukur PaddleOCR (`tube_exp_date`) di server, uji kurangi view/paralel
+      untuk kecepatan, validasi di set tube lebih besar. Kode depan 10 char (batch)
+      belum disentuh.
 - [ ] `coding_print` sisa: user cek item `_verify` di `coding_print_truth.json`
       + 2 foto tak pasti (2468, 847); resolusi unggah foto di ipc_app SUDAH
       dinaikkan (2026-11-11, ipc_app commit `99a0db3`: kamera ideal 1920x1080,
