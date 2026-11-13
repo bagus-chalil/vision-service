@@ -768,11 +768,33 @@ def analyze_coding_print(image_bgr):
 TUBE_EXP_MIN_AGREE = 3
 
 
+def _tube_exp_sides():
+    """View sizes for tube_exp_llm. Env TUBE_EXP_VIEW_SIDES (e.g. "1024,1600"); fallback CODING_VIEW_SIDES."""
+    raw = os.environ.get("TUBE_EXP_VIEW_SIDES")
+    if raw:
+        try:
+            sides = [int(x) for x in raw.split(",") if x.strip()]
+            if sides:
+                return sides
+        except ValueError:
+            pass
+    return _view_sides("CODING_VIEW_SIDES")
+
+
+def _tube_exp_parallel():
+    """Sources read concurrently (env TUBE_EXP_PARALLEL, default 1 = sequential)."""
+    try:
+        return max(1, int(os.environ.get("TUBE_EXP_PARALLEL", "1")))
+    except ValueError:
+        return 1
+
+
 def _read_exp_source(name, crop, cfg):
     """One source = one crop read at every view size, stopping at the first view that
     cannot lead to a trusted value (identical outcome, fewer LLM calls)."""
+    sides = _tube_exp_sides()
     views = []
-    for side in _view_sides("CODING_VIEW_SIDES"):
+    for side in sides:
         data, _, _ = _extract_with_retry(
             CODING_PROMPT, _encode_image(crop, side), CODING_SCHEMA, cfg, _validate_coding
         )
@@ -783,7 +805,7 @@ def _read_exp_source(name, crop, cfg):
             break
     first = (views[0]["exp"] or "").strip() or None
     trusted = (
-        len(views) == len(_view_sides("CODING_VIEW_SIDES"))
+        len(views) == len(sides)
         and first is not None
         and bool(CODING_EXP_DDMMYY.match(first))
         and all(((x["exp"] or "").strip() or None) == first and x["legible"] for x in views)
@@ -805,13 +827,28 @@ def analyze_tube_exp(image_bgr, crops):
         if len(sources) < need:  # YOLO tidak menemukan tube -> 3 sumber mustahil, tidak perlu memanggil LLM
             pass
         else:
-            for name, img in sources:
-                r = _read_exp_source(name, img, cfg)
-                reads.append(r)
-                if not r["trusted"]:
-                    fails += 1
-                    if len(sources) - fails < need:  # 3 sepakat sudah mustahil
-                        break
+            workers = min(_tube_exp_parallel(), len(sources))
+            if workers <= 1:
+                for name, img in sources:
+                    r = _read_exp_source(name, img, cfg)
+                    reads.append(r)
+                    if not r["trusted"]:
+                        fails += 1
+                        if len(sources) - fails < need:  # 3 sepakat sudah mustahil
+                            break
+            else:
+                # Concurrent sources; verdict is computed over the same reads in source order,
+                # so status equals the sequential run (sequential only skips reads that cannot change it).
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(workers) as ex:
+                    futs = [ex.submit(_read_exp_source, n, im, cfg) for n, im in sources]
+                    try:
+                        reads = [f.result() for f in futs]
+                    except BaseException:
+                        for f in futs:
+                            f.cancel()
+                        raise
     except LlmUnavailable as exc:
         return _error_result("tube_exp_llm", f"LLM_UNAVAILABLE: {exc}", time.perf_counter() - start)
     except LlmBadJson as exc:

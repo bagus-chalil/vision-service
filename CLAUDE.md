@@ -737,6 +737,48 @@ Endpoint `main.py`:
       Prompt khusus crimp (tanpa "legible" longgar) terlalu ketat: hanya 5 OK vs 13.
       Belum diuji: view paralel, kurangi view per sumber (mis. 2) untuk kecepatan.
 
+23. **Kecepatan `tube_exp_llm` + ukur PaddleOCR `tube_exp_date` di set tube (2026-11-13).**
+    Set lama = 176 foto tube berkode crimp (`classify.json`), hold-out = 19 foto (`classify_v2.json`
+    minus set lama). Kunci = DB; OK beda DB dicek visual (crop diperbesar). Tidak ada default produksi
+    yang berubah. Kode: env baru `TUBE_EXP_VIEW_SIDES` (fallback `CODING_VIEW_SIDES`) dan
+    `TUBE_EXP_PARALLEL` (default 1) di `llm_extract.py`; `tools/evaluate_tube_exp_llm.py --tag`;
+    `tools/evaluate_tube_exp_paddle.py` (baru, PaddleOCR di laptop atas izin khusus sesi ini).
+    - **Tugas 1 (kecepatan), set lama, workers=1, server .26 sedang lengang (baseline dijalankan ulang
+      supaya waktu sebanding; ukuran lama 10,5 dtk rata-rata dipengaruhi beban server):**
+
+      | Varian | OK | cocok DB | false OK | median / mean / p90 dtk | waktu kasus OK |
+      |---|---|---|---|---|---|
+      | Baseline 4 view (1024,640,1600,2048) | 11 | 8 | 0 | 2,6 / 5,0 / 10,9 | ±26 |
+      | 2 view (1024,1600) | 16 | 12 | **1** (3948: baca 130423, cetakan 130428, digit akhir mirip 8) | 2,6 / 4,3 / 10,8 | ±12 |
+      | 4 sumber paralel (`TUBE_EXP_PARALLEL=4`) | 11 (identik) | 8 | 0 | 5,0 / 7,8 / 16,5 | ±25 |
+
+      2 view DITOLAK: view ke-3/4 memang yang menangkap salah baca di 3948 (OK baru 4 benar + 1 salah);
+      hemat waktu rata-rata cuma 14%. Paralel DITOLAK: waktu kasus OK tidak membaik (server Ollama
+      tampak memproses serial) dan LOW malah 2x lebih lambat karena early-stop antar sumber hilang;
+      status identik dengan sekuensial. Kasus LOW (94% foto) sudah cepat (median 2,6 dtk) - biaya ada di
+      kasus OK (16 panggilan). Hold-out, konfigurasi default: 0 OK, 0 false OK, median 2,6 / mean 2,8 dtk.
+    - **Tugas 2 (PaddleOCR `tube_exp_date`, jalur label_anchor)**: set lama 15 OK (9 cocok DB, 6 beda DB)
+      + hold-out 3 OK (semua cocok DB). Waktu median 5,8 / mean 7,0 / p90 12 dtk di laptop CPU (LLM
+      default: 2,6 / 5,0 / 10,9 dtk; kasus OK LLM 26 dtk). **Cek visual 6 OK beda DB set lama:** 4277
+      (210929; cetakan memang 210929, sama dgn LLM, bukan salah baca); **5 FALSE OK sejati**: 4673
+      (baca 190028, cetakan 190428), 3980 (130423, cetakan 130428), 6993 (201031, DB 291031; garis hitam),
+      7677 (051129, cetakan 091129; batang hitam menutup digit pertama), 1388 (131020 vs DB 131029; garis
+      hitam). Confidence PaddleOCR pada false OK tinggi (0,91-0,98) -> confidence TIDAK menangkapnya.
+      Perbandingan foto sama: Paddle OK 18 vs LLM OK 11; irisan 3; Paddle-saja 15 (10 cocok DB,
+      5 false), LLM-saja 8 (semua benar). Jadi PaddleOCR menambah OK tapi TIDAK aman sebagai penentu
+      sendiri (5 false OK / 176 vs LLM 0), dan di hold-out (3 benar dari 19) LLM 0 - sampel terlalu kecil
+      untuk menyimpulkan.
+    - **Jawaban singkat:** PaddleOCR bukan lebih akurat (lebih banyak OK tapi 5 false OK), sedikit lebih
+      lambat di kasus LOW, jauh lebih cepat di kasus OK; belum aman jadi sumber ke-5 yang menaikkan OK.
+      Satu aturan yang TERLIHAT aman tapi post-hoc & kecil: "LLM LOW dengan nilai non-null yang SAMA persis
+      dgn OK Paddle" -> +2 OK di set lama (2144, 6425, keduanya benar, 0 false), +0 di hold-out. Kandidat
+      untuk divalidasi di set lebih besar, BELUM diterapkan. Aturan "OK hanya bila LLM OK DAN Paddle sepakat"
+      hanya menyisakan 3 OK (4277, 6518, 6567) - lebih aman tapi tidak menaikkan OK.
+    - Foto kunci: garis/batang hitam masih penyebab utama (5 dari 6 OK beda DB Paddle bergaris atau
+      digit ambigu). Tidak ada perbaikan software di sini; foto ulang tetap solusi.
+    - Data hasil: `testdata_private/tube/final_old_{base,s2a,par4}.json`, `final_new_base.json`,
+      `paddle_{old,new}.json` (gitignored).
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -1022,6 +1064,9 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       Ollama, cascade 3-dari-4 sumber; 11 OK / 175 foto (0 false OK terlihat),
       hold-out 19 foto 0 OK; `num_ctx` dihapus. Belum di-commit, belum di-deploy,
       belum dipakai `startup_check.html`. Aturan BELUM tervalidasi di set lebih besar.
+- [x] Kecepatan `tube_exp_llm` + ukur PaddleOCR di set tube (2026-11-13, gotcha #23): 2 view dan paralel
+      ditolak (false OK / tidak lebih cepat); PaddleOCR 18 OK tapi 5 false OK -> bukan penentu. Env
+      `TUBE_EXP_VIEW_SIDES`/`TUBE_EXP_PARALLEL` ditambah (default tidak berubah). Belum di-commit.
 - [ ] **Akurasi tube masih rendah (±6%)** — penghambat = garis hitam menimpa satu digit
       crimp (gotcha #22), bukan resolusi. Opsi: panduan foto ulang, kebijakan REVIEW di
       ipc_app, ukur PaddleOCR (`tube_exp_date`) di server, uji kurangi view/paralel

@@ -24,9 +24,10 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--set", choices=("old", "new"), required=True)
 ap.add_argument("--workers", type=int, default=2)
 ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--tag", default="", help="suffix nama output (final_<set>_<tag>.json); konfigurasi via env TUBE_EXP_VIEW_SIDES / TUBE_EXP_PARALLEL")
 args = ap.parse_args()
 
-OUT = D / f"final_{args.set}.json"
+OUT = D / (f"final_{args.set}_{args.tag}.json" if args.tag else f"final_{args.set}.json")
 old_ids = {x["id"] for x in json.loads((D / "classify.json").read_text(encoding="utf-8"))}
 items = [x for x in json.loads((D / "classify_v2.json").read_text(encoding="utf-8"))
          if x.get("container") == "tube" and x.get("code_on_crimp") and not x.get("error")
