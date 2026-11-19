@@ -147,6 +147,33 @@ def _call_ollama(prompt, image_b64, schema, cfg):
     return body
 
 
+def chat_text(system, prompt):
+    """Text-only chat (no image, free-form answer) through the same Ollama server and config as
+    the OCR/LLM readers. Used by ipc_app's "Analisis AI" on its field-issue log. LlmUnavailable
+    propagates, like every other call here."""
+    cfg = _cfg()
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload = {
+        "model": cfg["model"],
+        "stream": False,
+        "think": cfg["think"],
+        "options": {"temperature": 0.2, "seed": 0},
+        "messages": messages,
+    }
+    if cfg.get("num_ctx"):
+        payload["options"]["num_ctx"] = cfg["num_ctx"]
+    try:
+        resp = requests.post(f"{cfg['url']}/api/chat", json=payload, timeout=cfg["timeout"])
+        resp.raise_for_status()
+        body = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise LlmUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    return ((body.get("message") or {}).get("content") or "").strip()
+
+
 def _parse_json(content):
     try:
         data = json.loads(content)

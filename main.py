@@ -28,6 +28,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 import llm_extract
 import tube_emboss_pipeline
@@ -418,6 +419,24 @@ async def analyze(
             reference_date=reference_date,
         )
     return await run_ocr_path(run_generic_pipeline, image, field_type)
+
+
+class SummarizeTextRequest(BaseModel):
+    system: str = ""
+    prompt: str
+
+
+@app.post("/api/summarize-text")
+async def summarize_text(body: SummarizeTextRequest):
+    """Text-only LLM call (same Ollama server as the OCR readers). Used by ipc_app's "Analisis AI"
+    over its field-issue log. The caller must send already-anonymised text; nothing is stored here."""
+    if not body.prompt.strip() or len(body.prompt) > 12000 or len(body.system) > 4000:
+        return JSONResponse(status_code=400, content={"status": "ERROR", "error": "prompt kosong atau terlalu panjang"})
+    try:
+        text = await run_in_threadpool(llm_extract.chat_text, body.system, body.prompt)
+    except llm_extract.LlmUnavailable as exc:
+        return JSONResponse(status_code=503, content={"status": "ERROR", "error": f"Ollama tidak tersedia: {exc}"})
+    return {"status": "OK", "text": text}
 
 
 @app.get("/api/tube-emboss/field-types")
