@@ -66,22 +66,40 @@
     <label class="field">Backend URL</label>
     <input type="text" id="backendUrl" value="http://100.100.160.31:8000">
 
-    <label class="field">Field type (for format validation)</label>
+    <label class="field">Input</label>
     <select id="fieldTypeSelect"><option value="">Loading...</option></select>
     <div class="field-desc" id="fieldTypeDesc"></div>
     <label class="field-desc" style="margin-top:6px; cursor:pointer;">
       <input type="checkbox" id="showAllFieldTypes" style="width:auto; vertical-align:middle;">
-      Show all field types (dev/testing only - includes formats not validated for pilot use)
+      Tampilkan semua field type lama (dev/testing)
     </label>
 
+    <div id="devOnlyWrap" class="hidden">
     <label class="field">Tanggal mixing (ground-truth, optional - buat cross-check OCR EXP date)</label>
     <input type="date" id="referenceDateInput">
     <div class="field-desc">Kalau diisi, dibandingkan persis (exact match) ke hasil OCR day/month/year - dipakai buat ngetes akurasi OCR, bukan aturan bisnis EXP harus sama dengan tanggal mixing.</div>
+    </div>
 
     <div id="shelfLifeWrap" class="hidden">
       <label class="field" for="shelfLifeInput">Shelf-life SKU ini (bulan) - buat hitung EXP dari MFD</label>
       <input type="number" id="shelfLifeInput" min="1" max="120" step="1" placeholder="contoh: 36">
       <div class="field-desc">Dihitung di browser (EXP = MFD hasil OCR + N bulan), bukan dari Vision Service. Shelf-life beda per SKU - isi sesuai SKU yang difoto. Aturan final nantinya di Laravel.</div>
+    </div>
+
+    <div id="formulaWrap" class="hidden">
+      <label class="field" for="formulaPreset">Formula coding</label>
+      <select id="formulaPreset"><option value="auto">Auto (otomatis - semua formula dicoba)</option></select>
+      <div id="manualFormulaWrap" class="hidden">
+      <textarea id="formulaInput" rows="3" style="width:100%; font-family:monospace; font-size:12px;"
+        placeholder="satu segmen per baris, contoh:&#10;{BATCH3}&#10;EXP {DD}{MM}{YY} [{INIT}]"></textarea>
+      <div class="field-desc" id="formulaHelp">Token: {BATCH3} {DD} {MM} {YY} {YYYY} {MMM} {INIT}, L/D/X&lt;n&gt; (mis. {X7@batch}); [EXP DATE|EXP] = label opsional; {MM@mfg} = field MFG. Pemisah (spasi / . :) selalu opsional, jadi menyatu atau tidak tetap cocok. Di production formula dikirim ipc_app per SKU.</div>
+      </div>
+      <div class="field-desc" id="formulaExample">Operator tidak perlu memilih. Di production formula SKU dikirim ipc_app; tanpa itu dipakai Auto.</div>
+    </div>
+    <div id="file2Wrap" class="hidden">
+      <label class="field" for="file2Input">Foto ke-2 (sisi lain tube)</label>
+      <input type="file" id="file2Input" accept="image/*">
+      <div class="field-desc">Tiap foto dicari batch DAN EXP; posisi/cara cetak tidak diasumsikan. Nilai yang beda antar foto = CONFLICT (REVIEW).</div>
     </div>
 
     <label class="field">1. Get an image</label>
@@ -189,6 +207,10 @@ async function loadFieldTypes() {
     const resp = await fetch(base + '/api/field-types', { signal: AbortSignal.timeout(8000) });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     allFieldTypes = await resp.json();
+    try {
+      const m = await fetch(base + '/api/test-menu', { signal: AbortSignal.timeout(8000) });
+      productionMenu = m.ok ? await m.json() : [];
+    } catch (e) { productionMenu = []; }
     renderFieldTypeOptions();
   } catch (err) {
     fieldTypeSelect.innerHTML = '<option value="">(failed to load - check backend URL)</option>';
@@ -200,9 +222,18 @@ async function loadFieldTypes() {
 // wo_number/batch_no - still on the generic no-localization pipeline, see
 // CLAUDE.md). Hidden by default so pilot users can't accidentally pick them;
 // the checkbox exists purely for dev/testing against those fields locally.
+// Default: hanya menu produksi (input yang dipakai integrasi ipc_app, dari /api/test-menu).
+// Centang dev: semua field type lama seperti sebelumnya.
+let productionMenu = [];
 function renderFieldTypeOptions() {
-  const showAll = showAllFieldTypes.checked;
-  const types = allFieldTypes.filter((t) => showAll || t.pilot_ready !== false);
+  const showAll = showAllFieldTypes.checked || !productionMenu.length;
+  devOnlyWrap.classList.toggle('hidden', !showAll);
+  const byKey = Object.fromEntries(allFieldTypes.map((t) => [t.key, t]));
+  const types = showAll
+    ? allFieldTypes.filter((t) => t.pilot_ready !== false || showAllFieldTypes.checked)
+    : productionMenu.filter((m) => byKey[m.field_type]).map((m) => ({
+        ...byKey[m.field_type], ...m, key: 'menu:' + m.id, field_type: m.field_type,
+      }));
   fieldTypesByKey = {};
   fieldTypeSelect.innerHTML = '';
   types.forEach((t) => {
@@ -220,7 +251,82 @@ showAllFieldTypes.addEventListener('change', renderFieldTypeOptions);
 function updateFieldTypeDesc() {
   const t = fieldTypesByKey[fieldTypeSelect.value];
   fieldTypeDesc.textContent = t && t.description ? t.description : '';
+  if (!productionMenu.length && !showAllFieldTypes.checked) {
+    fieldTypeDesc.textContent = 'Server belum punya /api/test-menu (instance lama?) - restart uvicorn supaya menu ringkas ipc_app muncul. '
+      + fieldTypeDesc.textContent;
+  }
   shelfLifeWrap.classList.toggle('hidden', !(t && t.exp_from_shelf_life));
+  formulaWrap.classList.toggle('hidden', !(t && t.needs_formula));
+  file2Wrap.classList.toggle('hidden', !(t && t.needs_formula && (t.photos === 2 || showAllFieldTypes.checked)));
+  if (t && t.photos !== 2 && !showAllFieldTypes.checked) file2Input.value = '';
+  if (t && t.needs_formula) {
+    if (!formulaCatalog) loadFormulaCatalog().then(() => applyDefaultFormula(t));
+    else applyDefaultFormula(t);
+  }
+}
+
+const manualFormulaWrap = document.getElementById('manualFormulaWrap');
+showAllFieldTypes.addEventListener('change', () => {  // daftar formula ikut mode dev
+  formulaCatalog = null;
+  formulaPreset.innerHTML = '<option value="auto">Auto (otomatis - semua formula dicoba)</option>';
+  manualFormulaWrap.classList.add('hidden');
+});
+
+function applyDefaultFormula(t) {
+  if (t.default_formula === 'auto') { formulaPreset.value = 'auto'; manualFormulaWrap.classList.add('hidden'); return; }
+  if (!formulaCatalog || formulaInput.value.trim() || !t.default_formula || !formulaCatalog[t.default_formula]) return;
+  formulaPreset.value = t.default_formula;
+  formulaInput.value = formulaCatalog[t.default_formula].segments.join('\n');
+  formulaHelpExample(formulaCatalog[t.default_formula]);
+}
+
+const devOnlyWrap = document.getElementById('devOnlyWrap');
+const file2Wrap = document.getElementById('file2Wrap');
+
+const formulaWrap = document.getElementById('formulaWrap');
+const formulaPreset = document.getElementById('formulaPreset');
+const formulaInput = document.getElementById('formulaInput');
+const file2Input = document.getElementById('file2Input');
+let formulaCatalog = null;
+
+async function loadFormulaCatalog() {
+  try {
+    const base = backendUrlInput.value.replace(/\/+$/, '');
+    const resp = await fetch(base + '/api/coding-formulas', { signal: AbortSignal.timeout(8000) });
+    formulaCatalog = (await resp.json()).catalog || {};
+    for (const [key, item] of Object.entries(formulaCatalog)) {
+      if (!showAllFieldTypes.checked) break;  // mode sederhana: hanya Auto
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = item.label;
+      formulaPreset.appendChild(opt);
+    }
+    if (showAllFieldTypes.checked) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '(tulis sendiri)';
+      formulaPreset.appendChild(opt);
+    }
+  } catch (err) {
+    formulaCatalog = null;
+  }
+}
+
+formulaPreset.addEventListener('change', () => {
+  manualFormulaWrap.classList.toggle('hidden', formulaPreset.value !== '');
+  const item = formulaCatalog && formulaCatalog[formulaPreset.value];
+  if (item) {
+    formulaInput.value = item.segments.join('\n');
+    formulaHelpExample(item);
+  }
+});
+
+function formulaHelpExample(item) {
+  document.getElementById('formulaExample').textContent = 'Contoh cocok: ' + (item.contoh || []).join('  |  ');
+}
+
+function formulaSegments() {
+  return formulaInput.value.split('\n').map(x => x.trim()).filter(Boolean);
 }
 
 // DDMMYY + N months -> DDMMYY. Returns {error} instead of rolling over when
@@ -374,10 +480,16 @@ btnRunOcr.addEventListener('click', async () => {
   formData.append('file', currentBlob, 'capture.jpg');
   formData.append('request_id', requestId);
   formData.append('debug', 'true');
-  if (fieldTypeSelect.value) {
-    formData.append('field_type', fieldTypeSelect.value);
+  const selected = fieldTypesByKey[fieldTypeSelect.value];
+  if (selected) {
+    formData.append('field_type', selected.field_type || selected.key);
   }
-  const refDate = dateInputToDDMMYY(referenceDateInput.value);
+  const ft = selected;
+  if (ft && ft.needs_formula) {
+    formData.append('coding_formula', formulaPreset.value ? formulaPreset.value : JSON.stringify(formulaSegments()));
+    if (file2Input.files[0]) formData.append('file2', file2Input.files[0], file2Input.files[0].name);
+  }
+  const refDate = showAllFieldTypes.checked ? dateInputToDDMMYY(referenceDateInput.value) : null;
   if (refDate) {
     formData.append('reference_date', refDate);
   }
@@ -388,10 +500,11 @@ btnRunOcr.addEventListener('click', async () => {
       method: 'POST',
       body: formData,
     });
-    if (!resp.ok) {
+    let data;
+    try { data = await resp.json(); } catch (e) { data = null; }
+    if (!resp.ok && !(data && data.error)) {
       throw new Error('HTTP ' + resp.status);
     }
-    const data = await resp.json();
     if (data.error) {
       setStatus(data.error, true);
       resultMeta.textContent = data.error;
@@ -482,7 +595,32 @@ function renderLlmResult(data) {
   if (data.error) {
     rows.push(['error', `<b style="color:#b91c1c">${escapeHtml(data.error)}</b>`]);
   } else {
-    if (data.field_type === 'im_document') {
+    if (data.field_type === 'coding_formula') {
+      rows.push(['formula', data.formula_source === 'auto'
+        ? `<b>Auto</b> <span class="field-desc">(${data.formula.length} formula katalog dicoba; dua tafsiran beda = REVIEW)</span>`
+        : data.formula.map(escapeHtml).join('<br>')]);
+      for (const [name, f] of Object.entries(data.fields || {})) {
+        let cell = `${badgeHtml(f.status)} ${val(f.value)}`;
+        if (f.date) cell += ` <span class="field-desc">= ${f.date.day ?? '--'}/${f.date.month}/${f.date.year} (banding per ${f.granularity === 'day' ? 'hari' : 'bulan'})</span>`;
+        if (f.photos && f.photos.length) cell += ` <span class="field-desc">dari foto ${f.photos.map(i => i + 1).join(', ')}</span>`;
+        if (f.per_photo) cell += '<div class="field-desc">' + f.per_photo.map(x => `foto ${x.photo + 1}: ${escapeHtml(x.status)} ${escapeHtml(x.value ?? 'null')}`).join('; ') + '</div>';
+        rows.push([name + (data.required_fields.includes(name) ? '' : ' (info)'), cell]);
+      }
+      (data.photos || []).forEach((p, i) => {
+        const perField = Object.entries(p.fields).map(([n, f]) => `${n}: ${f.views.map(v => escapeHtml(v.value ?? '-')).join(' / ')}`).join('<br>');
+        const lines = p.views_read.map(v => `${v.side}px: ${escapeHtml(v.lines.join(' | ') || '(kosong)')}`).join('<br>');
+        rows.push([`foto ${i + 1} (${p.status})`, `<div class="field-desc">bacaan per view:<br>${perField}</div><div class="field-desc" style="margin-top:4px">salinan model:<br>${lines}</div>`]);
+      });
+      rows.push(['confidence (kasar, bukan probabilitas)', `${(data.confidence * 100).toFixed(0)}%`]);
+      rows.push(['waktu', `${data.elapsed_sec} dtk, ${data.attempts} panggilan LLM`]);
+      singleResultTable.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+      singleResultTable.classList.remove('hidden');
+      resultTable.classList.add('hidden');
+      mismatchNote.classList.add('hidden');
+      roiNotes.classList.add('hidden');
+      boxCanvas.getContext('2d').clearRect(0, 0, boxCanvas.width, boxCanvas.height);
+      return;
+    } else if (data.field_type === 'im_document') {
       rows.push(['im_number', val(data.im_number)]);
       const sl = data.shelf_life || [];
       rows.push(['shelf_life', sl.length

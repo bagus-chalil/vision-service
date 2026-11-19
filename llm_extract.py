@@ -136,6 +136,8 @@ def _call_ollama(prompt, image_b64, schema, cfg):
     }
     if cfg.get("num_ctx"):  # hanya bila dipaksa lewat env; default = konteks server
         payload["options"]["num_ctx"] = cfg["num_ctx"]
+    if cfg.get("num_predict"):  # batas token keluaran (coding_formula: cegah loop pengulangan)
+        payload["options"]["num_predict"] = cfg["num_predict"]
     try:
         resp = requests.post(
             f"{cfg['url']}/api/chat", json=payload, timeout=cfg["timeout"]
@@ -906,5 +908,184 @@ def analyze_tube_exp(image_bgr, crops):
         "confidence": 0.95 if ok else (0.5 if trusted_vals else 0.2),
         "engine_used": "ollama",
         "model": cfg["model"],
+        "elapsed_sec": round(time.perf_counter() - start, 2),
+    }
+
+
+# --------------------------------------------------------------------------
+# coding_formula: batch + EXP/MFG dicari menurut FORMULA SKU, di mana pun letaknya
+# --------------------------------------------------------------------------
+# Keputusan user 2026-11-19: tidak ada asumsi posisi (crimp/depan/belakang) atau cara cetak
+# (emboss/inkjet/label). Ollama HANYA menyalin baris kode; coding_formula.py (Python,
+# deterministik) mencocokkan salinan itu ke formula yang dikirim pemanggil. Formula sengaja
+# TIDAK dimasukkan ke prompt: memberi tahu model bentuk yang "diharapkan" terukur membuat
+# tebakan lolos cek format (gotcha #19). Tube: operator foto 2x, kedua foto dicari batch & EXP,
+# lalu coding_formula.merge_photos (beda nilai antar foto = CONFLICT, tidak memilih).
+
+CODE_LINES_PROMPT = """You are reading a photo taken on a cosmetics production line. Find every machine-made CODE on the product, its cap, crimp/sealed end, body, label, sachet, jar or box: batch/lot codes, expiry dates (EXP, ED, Use Before), manufacturing dates (MFG, MFD), short codes printed next to them, and the printed field labels that belong to them (e.g. "BATCH NO", "EXP DATE"). Codes can be inkjet dots, laser, thermal print, or embossed/debossed into plastic or metal, anywhere on the item.
+
+Transcribe each physical line of such code text as ONE string, exactly as printed, character by character, keeping spaces, dots, slashes and colons. Do not correct, reformat, translate, complete or reorder anything.
+
+Do NOT transcribe: ingredient lists, product names, marketing or usage text, company addresses, handwriting, the digits printed under a barcode, QR codes.
+
+If a character is unclear (glare, blur, small, cut off, or covered by a line, clip or finger), write ? in its place instead of guessing. A wrong confident character is far worse than ?.
+If there is no code at all, return an empty list.
+
+Answer with JSON only: {"lines": [string, ...]}"""
+
+CODE_LINES_SCHEMA = {
+    "type": "object",
+    "properties": {"lines": {"type": "array", "items": {"type": "string"}}},
+    "required": ["lines"],
+}
+
+
+def _validate_code_lines(data):
+    lines = data.get("lines")
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise LlmBadJson("lines missing or not a list of strings")
+
+
+def _code_lines_cfg():
+    """Config jalur coding_formula. Daftar baris kode normal hanya puluhan token; tanpa batas,
+    model sesekali terjebak mengulang baris sampai konteks penuh (terukur 2026-11-19: satu view
+    menggantung >2 menit). CODE_LINES_NUM_PREDICT (default 384) & CODE_LINES_TIMEOUT (default 40 dtk)."""
+    cfg = _cfg()
+    cfg["num_predict"] = int(os.environ.get("CODE_LINES_NUM_PREDICT", "384"))
+    cfg["timeout"] = float(os.environ.get("CODE_LINES_TIMEOUT", "40"))
+    return cfg
+
+
+def _code_lines_sides():
+    """Ukuran view jalur coding_formula. Env CODE_LINES_VIEW_SIDES, default 1024,1600,2048.
+    Diputuskan 2026-11-19 dari 184 foto coding (hold-out 35 + train 149, bacaan semua view
+    disimpan lalu disimulasikan offline, tools/analyze_coding_formula_runs.py):
+      4 view (1024,640,1600,2048): OK 40 / 184, rata2 2,3 dtk, kasus OK 4,3 dtk
+      1024,1600,2048           : OK 56 (+16),   rata2 2,4 dtk, kasus OK 3,7 dtk, false OK sama
+    View 640 px yang paling sering menyimpang (HJB/A1B/0LB) -> membatalkan bacaan yang benar.
+    View 1024 px WAJIB: dua false OK sejati (cetakan NLB dibaca HLB, foto 9820/9944) hanya lolos
+    di varian TANPA 1024. Dibaca pertama supaya early-exit memakai view paling andal."""
+    raw = os.environ.get("CODE_LINES_VIEW_SIDES", "1024,1600,2048")
+    try:
+        sides = [int(x) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        sides = []
+    return sides or [1024, 1600, 2048]
+
+
+def read_code_lines(image_bgr, side, cfg):
+    """Satu view: salinan baris kode. -> (lines | None, error | None). TANPA retry: dengan
+    temperature 0 percobaan ulang mengulang keluaran yang sama. JSON rusak/terpotong (loop)
+    = view gagal (abstain -> field tak bisa OK), BUKAN error seluruh permintaan.
+    LlmUnavailable (server mati) tetap dilempar."""
+    body = _call_ollama(CODE_LINES_PROMPT, _encode_image(image_bgr, side), CODE_LINES_SCHEMA, cfg)
+    content = (body.get("message") or {}).get("content", "")
+    try:
+        data = _parse_json(content)
+        _validate_code_lines(data)
+    except LlmBadJson as exc:
+        return None, f"{exc} (done_reason={body.get('done_reason')})"
+    return [x for x in data["lines"] if x and x.strip()], None
+
+
+def _formula_consensus(per_view, required):
+    """per_view: hasil coding_formula.extract per view (urut view). Field 'OK' hanya bila
+    SEMUA view FOUND dengan key sama (bukan mayoritas - gotcha #20). Nilai dari view pertama."""
+    import coding_formula as cfm
+
+    fields = {}
+    names = sorted(set().union(*(v["fields"].keys() for v in per_view)))
+    for f in names:
+        rows = [v["fields"].get(f) or {"status": "NOT_FOUND"} for v in per_view]
+        keys = [cfm.key_of(r) for r in rows]
+        ok = keys[0] is not None and all(k == keys[0] for k in keys)
+        base = next((r for r in rows if r.get("status") == "FOUND"), rows[0])
+        entry = {k: v for k, v in base.items() if k not in ("status", "candidates")}
+        entry.update(
+            status="OK" if ok else "LOW_CONFIDENCE",
+            key=keys[0] if ok else next((k for k in keys if k is not None), None),
+            view_keys=keys,
+            views=[{"status": r.get("status"), "value": r.get("value")} for r in rows],
+            required=f in required,
+        )
+        if not ok:
+            entry["value"] = base.get("value")
+        fields[f] = entry
+    return fields
+
+
+def _read_formula_photo(image_bgr, segments, required, cfg):
+    """Satu foto: salin baris kode di tiap ukuran view, urai tiap view dengan formula,
+    berhenti lebih awal bila semua field wajib sudah mustahil OK (hasil identik)."""
+    import coding_formula as cfm
+
+    per_view, lines_read, attempts = [], [], 0
+    for side in _code_lines_sides():
+        lines, err = read_code_lines(image_bgr, side, cfg)
+        attempts += 1
+        lines_read.append({"side": side, "lines": lines or [], **({"error": err} if err else {})})
+        parsed = cfm.extract(lines or [], segments)
+        if err:  # view gagal: tidak boleh menyumbang nilai
+            parsed["fields"] = {f: {"status": "VIEW_FAILED", "value": None} for f in parsed["fields"]}
+        per_view.append(parsed)
+        k0 = {f: cfm.key_of(per_view[0]["fields"].get(f)) for f in required}
+        alive = [f for f in required
+                 if k0[f] is not None and cfm.key_of(per_view[-1]["fields"].get(f)) == k0[f]]
+        if not alive:
+            break
+    fields = _formula_consensus(per_view, required)
+    return {
+        "fields": fields,
+        "status": "OK" if required and all(fields.get(f, {}).get("status") == "OK" for f in required)
+        else "LOW_CONFIDENCE",
+        "views_read": lines_read,
+        "rejected_view0": per_view[0]["rejected"],
+        "attempts": attempts,
+    }
+
+
+def _strip_internal(fields):
+    return {f: {k: v for k, v in r.items() if k not in ("key", "view_keys")} for f, r in fields.items()}
+
+
+def analyze_coding_formula(images_bgr, formula, required=None):
+    """coding_formula contract. images_bgr: 1 foto (non-tube) atau 2 (tube, bolak-balik).
+    formula: string atau list string (lihat coding_formula.py). Hanya membaca: tanpa PASS/FAIL,
+    nilai apa adanya. EXP dikembalikan sebagai teks + date{year,month,day} + granularity, supaya
+    ipc_app membandingkan sesuai formula (hari, atau bulan saja)."""
+    import coding_formula as cfm
+
+    cfg = _code_lines_cfg()
+    start = time.perf_counter()
+    segments = cfm.compile_formula(formula)  # FormulaError -> ditangani pemanggil (400)
+    wanted = set().union(*(s.fields for s in segments))
+    # required=None: semua batch/exp/mfg yang ada di formula. Mode auto: cukup batch + exp
+    # (MFG hanya muncul di sebagian formula katalog; tidak boleh membuat semua foto LOW).
+    required = [f for f in (required or cfm.REQUIRED_FIELDS) if f in wanted]
+    try:
+        photos = [_read_formula_photo(img, segments, required, cfg) for img in images_bgr]
+    except LlmUnavailable as exc:
+        return _error_result("coding_formula", f"LLM_UNAVAILABLE: {exc}", time.perf_counter() - start)
+    except LlmBadJson as exc:
+        return _error_result("coding_formula", f"LLM_BAD_JSON: {exc}", time.perf_counter() - start)
+
+    if len(photos) == 1:
+        merged = photos[0]["fields"]
+    else:
+        merged = cfm.merge_photos([p["fields"] for p in photos])
+    ok = bool(required) and all(merged.get(f, {}).get("status") == "OK" for f in required)
+    for p in photos:
+        p["fields"] = _strip_internal(p["fields"])
+    return {
+        "formula": [s.template for s in segments],
+        "required_fields": required,
+        "fields": _strip_internal(merged),
+        "photos": photos,
+        "status": "OK" if ok else "LOW_CONFIDENCE",
+        # NOT a calibrated probability: routing signal only.
+        "confidence": 0.95 if ok else (0.5 if any(merged.get(f, {}).get("status") == "OK" for f in required) else 0.2),
+        "engine_used": "ollama",
+        "model": cfg["model"],
+        "attempts": sum(p["attempts"] for p in photos),
         "elapsed_sec": round(time.perf_counter() - start, 2),
     }

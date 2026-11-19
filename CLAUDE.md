@@ -47,6 +47,9 @@ ada `request_id`, belum ada API contract final, belum ada auth/HTTPS.
 | `tools/` | Script diagnostic/batch dev-only (bukan bagian dari service, tidak dipanggil `main.py`): `diagnose_images_folder.py` (tube_emboss_default), `diagnose_exp_date_folder.py` (tube_exp_date, ditambahkan 2026-09-25), `diagnose_sharpening_ab.py` — semua `sys.path.insert` ke root supaya bisa `import tube_emboss_pipeline`, output ke `debug_output/` (kecuali `diagnose_exp_date_folder.py` yang cuma print summary table, gak nyimpen crop) |
 | `integrations/laravel-ipc/` | Bundle kode SISI LARAVEL (bukan Python) untuk `ipc_app` (`C:\laragon\www\new_trial_validation_app\ipc_app`, Laravel 12 + Inertia React): `files/` = mirror root `ipc_app` (semua file baru, tinggal copy), `README.md` = langkah integrasi + 3 edit manual. Di sinilah keputusan PASS/FAIL/REVIEW dibuat (`VisionEvaluator`), EXP = MFD + `master_products.shelf_life_months`, dan audit `ipc_logs`. Ditambahkan 2026-09-28, lihat status log |
 | `llm_extract.py` | Ekstraksi via LLM (Ollama, vision): `analyze_label_bulk()`, `analyze_im_document()`, `analyze_coding_print()` (coding NON-TUBE, gotcha #20), `analyze_tube_exp()` (EXP crimp tube, cascade, gotcha #22). Plain import sibling `main.py`, didaftarkan lewat `LLM_FIELD_TYPES` di `main.py`. Config via env (`OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_THINK`, `LABEL_VIEW_SIDES`/`IM_VIEW_SIDES`/`CODING_VIEW_SIDES`, dst) — lihat gotcha #19 |
+| `coding_formula.py` | Katalog token + parser FORMULA coding (batch/EXP/MFG) per SKU, Python murni tanpa GPU (gotcha #24). `extract()` mencari teks yang cocok formula di salinan baris kode; `merge_photos()` gabungan 2 foto tube; `formula_from_example()` usul formula dari contoh coding; `auto_segments()` = mode AUTO (gabungan katalog). Plain import sibling `main.py` |
+| `coding_formulas.json` | Katalog contoh formula (dari Format Kodifikasi IPC + isian operator DB), tanpa nama produk. Dibaca ulang tiap request. Setiap `contoh` diuji `tests/test_coding_formula.py`. Dokumen sumber xlsx (nama produk klien) dipindah ke `testdata_private/keys/reference/` dan di-gitignore (masih ada di history commit `1ecb57b`) |
+| `tools/evaluate_coding_formula_db.py`, `tools/evaluate_coding_formula_photos.py`, `tools/analyze_coding_formula_runs.py` | Uji parser ke isian coding operator DB (tanpa GPU); baca foto master via Ollama dengan SEMUA view tersimpan + waktu; analisis offline varian view/formula dari bacaan tersimpan (tanpa GPU tambahan). Output `testdata_private/runs/coding_formula/` |
 | `tools/evaluate_label_bulk.py` | Evaluasi akurasi per field + kecepatan `label_bulk` vs kunci jawaban (`tools/eval_data/label_bulk_truth.json`, `--truth` untuk file lain). Membedakan WRONG_CONFIDENT (lolos gerbang tapi salah = berbahaya) dari salah-tapi-ter-flag |
 | `tools/evaluate_coding_print.py` | Evaluasi `coding_print`. `--truth` menerima kunci bacaan foto (`batch`/`exp`) ATAU kunci data DB (`db_batch`/`db_exp_*`; OK yang beda DB = `OK_BEDA_DB_CEK_VISUAL`, wajib dicek mata, karena coding bisa memang beda dari DB) |
 | `testdata_private/` | Foto produksi + kunci jawaban privat untuk eval. **GITIGNORED, jangan pernah di-commit** (repo punya remote GitHub). **Sejak 2026-11-19 hanya 3 folder** (path dipusatkan di `tools/dataset.py`, skrip di `tools/` sudah mengikuti): `master/` = SATU-SATUNYA tempat foto (lihat baris berikut), `keys/` = semua kunci jawaban & set eval (field `path` relatif root repo -> `master/images/...` atau fixture `images/`), `runs/` = hasil eksperimen/log (skrip menulis output baru ke `runs/tube/` dst.; `runs/_backup_layout_lama_20261119.zip` = semua JSON lama sebelum migrasi). Folder lama `date_bulk/ im_number/ coding_print/ prod_1117/ tube/` DIHAPUS. Nama lama -> baru di `keys/`: `label_bulk_truth(_v2).json` -> `label_bulk_truth_v1/_v2.json`; `all_date_bulk.json` -> `label_bulk_set11.json`; `im_truth.json` sama; `prod_1117/im_db.json` -> `im_db.json`; `coding_print_truth.json` -> `coding_truth_set1.json`; `coding_print/_set2_db.json` -> `coding_db_set2.json`; `_db_candidates.json` -> `coding_db_candidates.json`; `prod_1117/coding_db*.json`/`coding_hi_rest`/`exp_subset`/`baseline_nonblank` -> `coding_db_prod1117/_sample150/_hi_rest/_exp_subset/_baseline_nonblank.json`; `tube/classify(_v2).json` -> `tube_classify(_v2).json`; `tube/manifest.json` -> `tube_manifest.json`. Saat migrasi, entri yang fotonya sampah (hitam/polos/data uji) DIKELUARKAN dari kunci (jumlahnya di `_migrated` tiap file; dicek mata: kunci manusia sendiri mencatatnya "foto hitam total"/"merah polos") -> angka eval lama di gotcha di bawah dihitung SEBELUM pembersihan (set tube old/new tetap 176/19, tidak berubah). Path lama yang disebut di gotcha di bawah (`testdata_private/tube/...` dst.) = nama lama. Temuan tube lama: `image_tube` DB mayoritas foto produk utuh/jauh (banyak BUKAN tube, tanpa emboss terbaca) - belum dipilah. `keys/tube_classify.json` (`tools/classify_tube_candidates.py`) = foto coding packing/startup yang Qwen (1 view, penyaring awal, belum dicek penuh) nilai TUBE; 175 dengan kode emboss di crimp, 150 di antaranya ada garis hitam menimpa kode (sensor/eye mark, posisi sama di semua tube - lihat gotcha #14). Baseline 2026-11-12 (`tools/baseline_tube_exp.py`, jalur Ollama `coding_print`, 175 foto tube berkode crimp, kunci DB): 5 OK (semua cocok DB), 170 LOW, 0 false OK; garis hitam 1/128 OK vs tanpa garis 4/47 OK. `tube_exp_date` (PaddleOCR) BELUM diukur di set ini (CPU, bukan di laptop). Prototype mode topeng (`tools/proto_masked_exp.py`, model baca EXP 6 char dgn '?' tanpa diberi nilai DB, 3 view per-posisi, cocok ke DB dgn wildcard): FULL_MATCH 23, PARTIAL_CONSISTENT 42, CONFLICT 26, NO_SIGNAL 84 (dari 175). TEMUAN: model HALUSINASI di bawah garis hitam walau 3 view konsisten (mis. 7723 baca '9' di posisi tertutup) -> CONFLICT bisa konflik palsu, jangan dipakai utk FAIL; perlu deteksi garis hitam via OpenCV utk memaksa posisi di bawahnya '?' (belum dikerjakan). Detektor garis hitam OpenCV DICOBA & DIBUANG (2026-11-12): hanya menemukan 54 dari ±128 foto bergaris (garis cuma ±3 px di foto jauh, butuh lokalisasi crimp dulu) + false positive (stiker kuning, huruf logo) - flag Qwen `black_mark_over_code` justru lebih akurat di cek visual. Garis ini tercetak di crimp SEMUA tube yang dilihat, jadi kebijakan yang diusulkan: ANGGAP selalu ada, 1 posisi selalu tak terverifikasi (toleransi 1 beda -> REVIEW, bukan konflik; FULL_MATCH bukan bukti kuat). Dari 26 CONFLICT: 11 beda 1 posisi, 15 beda >=2. Prototype BELUM masuk main.py/llm_extract.py |
@@ -791,6 +794,46 @@ Endpoint `main.py`:
     - Data hasil: `testdata_private/tube/final_old_{base,s2a,par4}.json`, `final_new_base.json`,
       `paddle_{old,new}.json` (gitignored).
 
+24. **`coding_formula` - batch/EXP dicari menurut FORMULA, di mana pun letaknya (2026-11-19).**
+    Keputusan user: TIDAK ada asumsi posisi (depan = batch / belakang = EXP / EXP di crimp) atau cara
+    cetak (emboss/inkjet/label) - sample nyata: EXP inkjet di badan tube atas tutup ("EXP NOV 29"),
+    batch+EXP di kotak label ("BATCH NO PLB / EXP DATE 181129 TQ"). Tube: operator foto 2x, KEDUA
+    foto dicari batch DAN EXP lalu `merge_photos` (beda nilai = CONFLICT; foto tak-yakin baru dianggap
+    bertentangan bila TIDAK ADA view-nya yang membaca nilai OK - satu view halusinasi tidak memblokir).
+    - **Pembagian tugas:** Ollama HANYA menyalin baris kode (`CODE_LINES_PROMPT`, karakter tak jelas = `?`),
+      formula TIDAK masuk prompt (gotcha #19); `coding_formula.py` mencocokkan. Pemisah antar elemen
+      selalu opsional (menyatu atau tidak), nilai tidak pernah diedit. Ujung segmen tak boleh menempel
+      huruf/angka (gotcha #15). Kandidat didahului label field lain (MFD -> bukan EXP) ditolak. Kata 3
+      huruf label/bulan (EXP, NOV, ...) bukan batch. Dua nilai berbeda = AMBIGUOUS (REVIEW).
+    - **Sintaks:** `{BATCH3}` `{DD}{MM}{YY}` `{YYYY}` `{MMM}` `{INIT}` `L/D/X<n>` (`{X7@batch}` utk 26Y070X),
+      `@mfg`, `[EXP DATE|EXP]` opsional. EXP dikembalikan `date{year,month,day}` + `granularity`
+      (hari/bulan) supaya ipc_app banding sesuai formula. **MMYYYY 6 digit (`EXP 112028`) tidak pernah
+      ambigu dgn DDMMYY** (bulan jadi "20"); parser DDMMYY-only lama (coding_print) menolaknya.
+    - **API:** `/api/analyze` `field_type=coding_formula`, `coding_formula` = kunci katalog / JSON array /
+      template / kosong-atau-`auto`; `file2` opsional. Mode AUTO (permintaan user: operator tidak boleh
+      disuruh memilih; baru 6 IM punya formula) = semua formula katalog sekaligus, wajib batch+exp saja,
+      respons `formula_source: "auto"`. `GET /api/coding-formulas`, `GET /api/test-menu` (menu index.html
+      disederhanakan: Label Bulk, IM, Coding non-tube 1 foto, Tube 2 foto; field type lama di balik centang dev).
+    - **Kecepatan:** Ollama .26 serial (gotcha #23) -> paralel tidak membantu. Per view (GPU): 640 px 0,66 dtk,
+      1024 0,88, 1600 1,17, 2048 1,77. Tanpa batas token model sesekali LOOP mengulang baris (satu view
+      menggantung >2 menit) -> `num_predict` 384 + timeout 40 dtk (`CODE_LINES_NUM_PREDICT`/`_TIMEOUT`),
+      TANPA retry (temperature 0 = keluaran sama), JSON rusak = view gagal (bukan ERROR permintaan).
+      Early-exit begitu semua field wajib mustahil OK.
+    - **Hasil ukur (184 foto coding master: hold-out 35 + train 149 yang belum dipakai kunci; formula
+      diusulkan dari isian operator; kunci DB):** default view **1024,1600,2048** (`CODE_LINES_VIEW_SIDES`):
+      formula SKU 56 OK (30%), AUTO 59 OK (32%), rata2 2,4 dtk/foto, kasus OK 3,7 dtk. 4 view lama: 40 OK.
+      OK beda DB dicek mata: 10395/10413 cetak OLB (DB PLB), 10313/10314/10385 cetak 111128 (DB 2029) ->
+      coding memang beda DB, bukan salah baca; **10031 kemungkinan false OK** (cetak `1711202?`, digit
+      akhir inkjet bolong, AI baca 2023, DB 2029 - tetap bukan false PASS krn beda dari EXP diharapkan).
+      **False OK sejati 9820/9944 (cetak NLB dibaca HLB) hanya lolos di varian TANPA view 1024** ->
+      1024 wajib & dibaca pertama. Penyebab LOW (AUTO): 52 batch+exp tak cocok formula (umumnya tube
+      emboss tak terbaca / model mengarang "LOT 240901 EXP 09/2027" - semua tertolak formula), 33 view
+      tak sepakat, 18 batch saja, 13 tak ada kode, 9 exp saja.
+    - **Uji parser ke 506 isian operator DB** (`evaluate_coding_formula_db.py`): 330 cocok DB, 36 beda
+      DB (coding vs DB / salah ketik), 7 gagal (catatan "WIP" dsb), 133 bukan coding ("Shipper").
+    - **Belum:** ipc_app masih memanggil `coding_print`/`tube_exp_date`/`tube_exp_llm`; integrasi butuh
+      ipc_app kirim `field_type=coding_formula` + formula SKU (master produk) + foto ke-2. Belum di-commit.
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai
@@ -1102,6 +1145,9 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       + DB disinkron user; 8158 layak per use_case, split train/eval per batch. `testdata_private/` dirapikan jadi
       `master/ keys/ runs/` (folder lama dihapus, kunci dipindah + dibersihkan, `tools/dataset.py`, 11 skrip
       `tools/` disesuaikan; 4386 path kunci terverifikasi ada). Belum di-commit.
+- [x] `coding_formula` (2026-11-19, gotcha #24): katalog token + parser formula, mode AUTO, gabungan 2 foto
+      tube, menu index.html disederhanakan; 184 foto: 59 OK (AUTO) vs 40 dgn 4 view lama, 2,4 dtk/foto.
+      Belum di-commit, belum diintegrasikan ke ipc_app.
 - [ ] **Akurasi tube masih rendah (±6%)** — penghambat = garis hitam menimpa satu digit
       crimp (gotcha #22), bukan resolusi. Opsi: panduan foto ulang, kebijakan REVIEW di
       ipc_app, ukur PaddleOCR (`tube_exp_date`) di server, uji kurangi view/paralel

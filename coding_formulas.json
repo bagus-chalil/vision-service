@@ -1,0 +1,48 @@
+{
+  "_doc": "Contoh formula coding (sintaks: coding_formula.py). Diturunkan dari Format Kodifikasi IPC (6 IM) + isian coding operator di DB, 2026-11-19. Formula sebenarnya PER SKU disimpan & dikirim ipc_app; daftar ini hanya contoh/titik awal untuk QC. 'contoh' = teks coding nyata yang harus cocok.",
+  "label_exp_ddmmyy_init": {
+    "label": "Batch + EXP DDMMYY + inisial (umum, 1 atau 2 baris)",
+    "segments": ["[BATCH NO|BATCH|BN|LOT] {BATCH3}", "[EXP DATE|EXP|ED] {DD}{MM}{YY} [{INIT}]"],
+    "contoh": ["OKB EXP 231029 CW", "AKB / EXP 191029 QW", "BATCH NO PLB / EXP DATE 181129 TQ", "HKB EXP 271029UI"]
+  },
+  "exp_ddmmyyyy": {
+    "label": "Batch + EXP DDMMYYYY",
+    "segments": ["{BATCH3}", "[EXP] {DD}{MM}{YYYY}"],
+    "contoh": ["WLB / 17112029", "EXP 29122026"]
+  },
+  "exp_mm_yyyy": {
+    "label": "Batch + EXP bulan/tahun 4 digit (MM YYYY atau MM/YYYY)",
+    "segments": ["{BATCH3}", "EXP {MM}{YYYY} [{INIT}]"],
+    "contoh": ["AKB EXP 10 2029 GK", "ACA / EXP 03/2027 XX"]
+  },
+  "exp_mmyyyy_batch_long": {
+    "label": "Emboss batch panjang + EXP MMYYYY (6 digit, BUKAN DDMMYY)",
+    "segments": ["{X7@batch}", "EXP {MM}{YYYY}"],
+    "contoh": ["26Y070X / EXP 112028"]
+  },
+  "mfg_exp_mm_yyyy_labeled": {
+    "label": "Case: MFG MM/YYYY + batch, EXP MM/YYYY + inisial",
+    "segments": ["MFG {MM@mfg}/{YYYY@mfg} {BATCH3}", "EXP {MM}/{YYYY} [{INIT}]"],
+    "contoh": ["MFG 04/2024 ADZ / EXP 04/2027 XX"]
+  },
+  "mfg_exp_mm_yyyy_unlabeled": {
+    "label": "Bottom label/unit box 3 baris TANPA label: batch, MFG, EXP (urutan menentukan)",
+    "segments": ["{BATCH3} {MM@mfg}/{YYYY@mfg} {MM}/{YYYY}"],
+    "contoh": ["AHB / 08/2026 / 04/2029"]
+  },
+  "pouch_exp_not": {
+    "label": "Pouch: batch EXP DDMMYY inisial NOT number (1 baris)",
+    "segments": ["{BATCH3} EXP {DD}{MM}{YY} [{INIT}] [NOT{D9}{L1}]"],
+    "contoh": ["AFA EXP 040627 XX NOT241102388K"]
+  },
+  "tube_exp_month_name": {
+    "label": "Tube: batch + EXP nama bulan (MMM YY)",
+    "segments": ["{BATCH3}", "EXP {MMM} {YY}"],
+    "contoh": ["AHB / EXP AUG 29", "EXP NOV 29"]
+  },
+  "sachet_ex_mmyy": {
+    "label": "Sachet emboss: EX + MMYY menyatu, lalu batch",
+    "segments": ["EX{MM}{YY} {BATCH3}"],
+    "contoh": ["EX0927 AJZ"]
+  }
+}

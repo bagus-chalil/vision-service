@@ -29,3 +29,6 @@ debug_output/
 
 # Foto produksi / data uji privat (JANGAN di-commit, repo punya remote GitHub)
 testdata_private/
+
+# Dokumen internal QC (format kodifikasi per IM, nama produk klien) - simpan di testdata_private/keys/reference/
+images/sources/*.xlsx

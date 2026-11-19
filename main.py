@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import coding_formula
 import llm_extract
 import tube_emboss_pipeline
 
@@ -372,7 +373,94 @@ def field_types():
                 "pilot_ready": True,
             }
         )
+    merged.append(
+        {
+            "key": CODING_FORMULA_FIELD,
+            "label": "Coding menurut formula (batch + EXP)",
+            "description": "Batch/EXP/MFG dicari menurut formula SKU di mana pun letaknya (emboss/inkjet/label); "
+                           "tube boleh 2 foto. Butuh form field coding_formula. LLM Ollama hanya menyalin.",
+            "expected_length": None,
+            "pipeline": "llm",
+            "pilot_ready": True,
+            "needs_formula": True,
+        }
+    )
     return merged
+
+
+CODING_FORMULA_FIELD = "coding_formula"
+CODING_FORMULAS_PATH = Path(__file__).parent / "coding_formulas.json"
+
+
+def load_coding_formula_catalog():
+    """Contoh formula (dibaca ulang tiap request, edit tanpa restart)."""
+    data = json.loads(CODING_FORMULAS_PATH.read_text(encoding="utf-8"))
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+def resolve_coding_formula(raw):
+    """Form field coding_formula -> (list segmen, sumber). Terima: kosong / "auto" (gabungan semua
+    formula katalog, sumber "auto"), kunci katalog (sumber "catalog"), JSON array string atau satu
+    template string (sumber "sku"). Selalu divalidasi (FormulaError bila salah)."""
+    raw = (raw or "").strip()
+    catalog = load_coding_formula_catalog()
+    if not raw or raw.lower() == coding_formula.AUTO:
+        segments = coding_formula.auto_segments(catalog)
+        coding_formula.compile_formula(segments)
+        return segments, "auto"
+    if raw in catalog:
+        coding_formula.compile_formula(catalog[raw]["segments"])
+        return catalog[raw]["segments"], "catalog"
+    if raw.startswith("["):
+        try:
+            segments = json.loads(raw)
+        except ValueError as exc:
+            raise coding_formula.FormulaError(f"coding_formula bukan JSON array yang valid: {exc}") from exc
+    else:
+        segments = [raw]
+    coding_formula.compile_formula(segments)
+    return segments, "sku"
+
+
+def run_coding_formula_pipeline(images, segments, request_id, formula_source="sku"):
+    start = time.time()
+    required = ["batch", "exp"] if formula_source == "auto" else None
+    result = llm_extract.analyze_coding_formula(images, segments, required=required)
+    result.update(field_type=CODING_FORMULA_FIELD, request_id=request_id, pipeline="llm",
+                  formula_source=formula_source,
+                  processing_time_ms=round((time.time() - start) * 1000, 1))
+    return result
+
+
+# Menu halaman uji (index.html) = input yang dipakai integrasi ipc_app (Startup Check):
+# Label Bulk, IM, coding non-tube (1 foto), tube (2 foto, batch + EXP). Field type lama tetap
+# bisa dipilih lewat centang "dev" di halaman. Ini hanya alat uji: di production field_type +
+# formula dikirim ipc_app per langkah alur kerja / per SKU, Vision Service tidak menebak.
+PRODUCTION_MENU = [
+    {"id": "label_bulk", "label": "Label Bulk - No Batch + Mixing Date", "field_type": "label_bulk", "photos": 1},
+    {"id": "im", "label": "IM - umur simpan", "field_type": "im_document", "photos": 1},
+    {"id": "coding", "label": "Coding non-tube - batch + EXP (1 foto)", "field_type": CODING_FORMULA_FIELD,
+     "photos": 1, "default_formula": coding_formula.AUTO},
+    {"id": "tube", "label": "Tube - batch + EXP (foto 2 sisi)", "field_type": CODING_FORMULA_FIELD,
+     "photos": 2, "default_formula": coding_formula.AUTO},
+]
+
+
+@app.get("/api/test-menu")
+def test_menu():
+    return PRODUCTION_MENU
+
+
+@app.get("/api/coding-formulas")
+def coding_formulas():
+    """Katalog token + contoh formula, untuk ipc_app/QC menyusun formula per SKU."""
+    return {
+        "tokens": {k: {"field": v["field"], "description": v["desc"]} for k, v in coding_formula.TOKENS.items()},
+        "generic_tokens": "L<n> huruf besar, D<n> angka, X<n> huruf besar/angka (field lewat @, mis. {X7@batch})",
+        "syntax": "{TOKEN} / {TOKEN@field}; teks = label literal; [a|b] opsional; (a|b) alternatif wajib; "
+                  "pemisah (spasi / . : - _ baris baru) selalu opsional",
+        "catalog": load_coding_formula_catalog(),
+    }
 
 
 @app.post("/api/analyze")
@@ -382,6 +470,8 @@ async def analyze(
     request_id: str = Form(None),
     debug: bool = Form(False),
     reference_date: str = Form(None),
+    coding_formula_spec: str = Form(None, alias="coding_formula"),
+    file2: UploadFile = File(None),
 ):
     """Single entrypoint for index.html: looks up field_type's pipeline in
     emboss_format_patterns.json vs field_patterns.json and dispatches to the
@@ -400,6 +490,21 @@ async def analyze(
 
     if image is None:
         return DECODE_ERROR
+
+    if field_type == CODING_FORMULA_FIELD:
+        try:
+            segments, formula_source = resolve_coding_formula(coding_formula_spec)
+        except coding_formula.FormulaError as exc:
+            return JSONResponse(status_code=400, content={"status": "ERROR", "error": f"FORMULA_INVALID: {exc}"})
+        images = [image]
+        if file2 is not None and file2.filename:
+            image2 = cv2.imdecode(np.frombuffer(await file2.read(), dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image2 is None:
+                return DECODE_ERROR
+            images.append(image2)
+        return await run_in_threadpool(
+            run_coding_formula_pipeline, images, segments, request_id or str(uuid.uuid4()), formula_source
+        )
 
     if field_type in LLM_FIELD_TYPES:
         # LLM jalur (Ollama GPU). Panggilan HTTP-nya blocking dan lama (beberapa
