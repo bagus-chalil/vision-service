@@ -10,8 +10,8 @@ Varian crop (dari bbox tube YOLO):
   tube  = seluruh bbox tube
 
 Kunci = exp_date DB (bukan bacaan foto): OK beda DB = CEK_VISUAL, bukan otomatis salah.
-Input : testdata_private/tube/classify.json (175 foto tube berkode crimp)
-Output: testdata_private/tube/crop_exp_<varian>.json (gitignored, resumable)
+Input : testdata_private/keys/tube_classify.json (175 foto tube berkode crimp)
+Output: testdata_private/runs/tube/crop_exp_<varian>.json (gitignored, resumable)
 Pakai : venv\\Scripts\\python.exe tools/experiment_tube_crop.py --variant top30 [--limit N]
 """
 import argparse
@@ -26,7 +26,11 @@ import cv2  # noqa: E402
 import llm_extract as L  # noqa: E402
 import tube_emboss_pipeline as T  # noqa: E402
 
-D = ROOT / "testdata_private" / "tube"
+sys.path.insert(0, str(ROOT / "tools"))
+from dataset import RUNS, load_key, resolve  # noqa: E402
+
+D = RUNS / "tube"
+D.mkdir(parents=True, exist_ok=True)
 FRACTION = {"crimp": 0.15, "top30": 0.30, "tube": 1.0}
 
 ap = argparse.ArgumentParser()
@@ -36,30 +40,13 @@ ap.add_argument("--workers", type=int, default=2)
 args = ap.parse_args()
 
 OUT = D / f"crop_exp_{args.variant}.json"
-items = [x for x in json.loads((D / "classify.json").read_text(encoding="utf-8"))
+items = [x for x in load_key("tube_classify.json")
          if x.get("container") == "tube" and x.get("code_on_crimp")]
 if args.limit:
     items = items[: args.limit]
 # Entri ERROR (mis. terowongan Ollama putus) TIDAK dianggap selesai: dikerjakan ulang saat dilanjutkan.
 done = ({x["id"]: x for x in json.loads(OUT.read_text(encoding="utf-8")) if x.get("status") != "ERROR"}
         if OUT.exists() else {})
-
-# classify.json menyimpan path asli di Downloads\ipc-attachments yang sudah tidak
-# lengkap; salinannya ada di photos_candidates (pri_<id>.jpg / cod_<id>.jpg).
-_copies = {}
-for _p in sorted((D / "photos_candidates").iterdir()):
-    _copies.setdefault(_p.stem.split("_", 1)[-1], []).append(_p)
-_dupe = [k for k, v in _copies.items() if len(v) > 1]
-if _dupe:
-    print("PERINGATAN: id ganda di photos_candidates:", _dupe[:5], flush=True)
-
-
-def resolve_path(it):
-    if Path(it["path"]).exists():
-        return it["path"]
-    c = _copies.get(str(it["id"]))
-    return str(c[0]) if c else it["path"]
-
 
 yolo = T.load_yolo_model()
 cfg = L._cfg()
@@ -71,7 +58,7 @@ def work(it):
     base = {k: it.get(k) for k in ("id", "path", "db_exp", "black_mark_over_code")}
     y, m, d = it["db_exp"].split("-")
     base["db_ddmmyy"] = d + m + y[2:]
-    img = cv2.imread(resolve_path(it))
+    img = cv2.imread(resolve(it["path"]))
     if img is None:
         return {**base, "status": "ERROR", "error": "unreadable"}
     loc = T.localize_tube(img, yolo)  # YOLO dipanggil dari 1 thread per item; model dibagi

@@ -1,14 +1,17 @@
 """PROTOTYPE mode verifikasi-topeng EXP tube. Model membaca EXP 6 karakter dgn '?' utk
 karakter tertutup (garis hitam/glare) TANPA diberi nilai DB; per-posisi konsensus antar
 ukuran view (beda -> '?'); pencocokan ke EXP diharapkan dilakukan di kode (wildcard).
-Output: testdata_private/tube/masked_exp.json (gitignored)."""
+Input : testdata_private/runs/tube/baseline_exp.json (output tools/baseline_tube_exp.py).
+Output: testdata_private/runs/tube/masked_exp.json (gitignored)."""
 import json, re, sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 import cv2, llm_extract as L  # noqa: E402
-D = ROOT / "testdata_private" / "tube"
+from dataset import RUNS, image_path  # noqa: E402
+D = RUNS / "tube"
 OUT = D / "masked_exp.json"
 SIDES = [1024, 1600, 2048]
 PROMPT = """This photo shows a cosmetic tube. On its flat sealed (crimp) end there is an embossed/stamped line "EXP" followed by a 6-digit expiry date DDMMYY.
@@ -47,7 +50,7 @@ items = [x for x in json.loads((D / "baseline_exp.json").read_text(encoding="utf
 done = {x["id"]: x for x in json.loads(OUT.read_text(encoding="utf-8"))} if OUT.exists() else {}
 def work(it):
     if it["id"] in done: return done[it["id"]]
-    img = cv2.imread(it["path"]); v = read_views(img, cfg); m = merge(v)
+    img = cv2.imread(image_path(it["id"]) or ""); v = read_views(img, cfg); m = merge(v)
     return {"id": it["id"], "path": it["path"], "black_mark": it["black_mark_over_code"], "db": it["db_ddmmyy"],
             "views": v, "merged": m, "verdict": compare(m, it["db_ddmmyy"])}
 res, n = [], 0

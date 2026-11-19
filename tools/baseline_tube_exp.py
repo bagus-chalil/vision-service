@@ -1,22 +1,24 @@
 """Baseline baca EXP tube (jalur Ollama coding_print) vs DB, dipecah per garis hitam.
-Input: testdata_private/tube/classify.json. Output: testdata_private/tube/baseline_exp.json (gitignored).
+Input: testdata_private/keys/tube_classify.json. Output: testdata_private/runs/tube/baseline_exp.json (gitignored).
 Kunci DB = exp_date batch (BUKAN bacaan foto): OK beda DB = CEK_VISUAL, bukan otomatis salah."""
 import json, sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 import cv2, llm_extract as L  # noqa: E402
-D = ROOT / "testdata_private" / "tube"
-OUT = D / "baseline_exp.json"
-items = [x for x in json.loads((D / "classify.json").read_text(encoding="utf-8"))
+from dataset import RUNS, load_key, resolve  # noqa: E402
+OUT = RUNS / "tube" / "baseline_exp.json"
+OUT.parent.mkdir(parents=True, exist_ok=True)
+items = [x for x in load_key("tube_classify.json")
          if x.get("container") == "tube" and x.get("code_on_crimp")]
 done = {x["id"]: x for x in json.loads(OUT.read_text(encoding="utf-8"))} if OUT.exists() else {}
 
 def work(it):
     if it["id"] in done:
         return done[it["id"]]
-    img = cv2.imread(it["path"])
+    img = cv2.imread(resolve(it["path"]))
     try:
         r = L.analyze_coding_print(img)
     except Exception as e:

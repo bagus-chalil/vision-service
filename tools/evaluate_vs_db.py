@@ -28,12 +28,15 @@ import cv2
 
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(ROOT_DIR / "tools"))
 import llm_extract
+from dataset import KEYS, MASTER
 
 MYSQL = r"C:\laragon\bin\mysql\mysql-8.4.3-winx64\bin\mysql.exe"
+# field_label DB, folder foto di master/images, fungsi
 KINDS = {
-    "label_bulk": ("date_bulk", llm_extract.analyze_label_bulk),
-    "im": ("im_number", llm_extract.analyze_im_document),
+    "label_bulk": ("date_bulk", MASTER / "images" / "label_bulk" / "filling__date_bulk", llm_extract.analyze_label_bulk),
+    "im": ("im_number", MASTER / "images" / "im_document" / "startup__im_number", llm_extract.analyze_im_document),
 }
 
 
@@ -55,14 +58,14 @@ def db_rows(label):
 
 def used_ids():
     ids = set()
-    for f in ("label_bulk_truth.json", "label_bulk_truth_v2.json", "im_truth.json"):
-        for base in (ROOT_DIR / "testdata_private", ROOT_DIR / "tools" / "eval_data"):
-            fp = base / f
-            if fp.exists():
-                for it in json.loads(fp.read_text(encoding="utf-8"))["items"]:
-                    m = re.search(r"(\d+)\.jpg$", it["path"])
-                    if m:
-                        ids.add(int(m.group(1)))
+    for base, f in ((KEYS, "label_bulk_truth_v1.json"), (KEYS, "label_bulk_truth_v2.json"), (KEYS, "im_truth.json"),
+                    (ROOT_DIR / "tools" / "eval_data", "label_bulk_truth.json")):
+        fp = base / f
+        if fp.exists():
+            for it in json.loads(fp.read_text(encoding="utf-8"))["items"]:
+                m = re.search(r"(\d+)\.jpg$", it["path"])
+                if m:
+                    ids.add(int(m.group(1)))
     return ids
 
 
@@ -79,10 +82,10 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    folder, fn = KINDS[args.kind]
-    db = db_rows(folder)
+    label, folder, fn = KINDS[args.kind]
+    db = db_rows(label)
     skip = used_ids()
-    files = sorted(int(p.stem) for p in (ROOT_DIR / "testdata_private" / folder).glob("*.jpg"))
+    files = sorted(int(p.stem) for p in folder.glob("*.jpg"))
     pool = [i for i in files if i not in skip and i in db]
     random.Random(args.seed).shuffle(pool)
     sample = pool[: args.n]
@@ -90,7 +93,7 @@ def main():
 
     results = []
     for k, i in enumerate(sample, 1):
-        img = cv2.imread(str(ROOT_DIR / "testdata_private" / folder / f"{i}.jpg"))
+        img = cv2.imread(str(folder / f"{i}.jpg"))
         if img is None:
             continue
         t0 = time.perf_counter()

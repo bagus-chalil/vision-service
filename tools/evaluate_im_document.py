@@ -40,7 +40,7 @@ def shelf_set(entries):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--truth", default=str(ROOT_DIR / "testdata_private" / "im_truth.json"))
+    ap.add_argument("--truth", default=str(ROOT_DIR / "testdata_private" / "keys" / "im_truth.json"))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dump", default=None)
     args = ap.parse_args()

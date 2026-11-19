@@ -5,7 +5,8 @@ Tanpa import main.py (tidak memuat model lain). PaddleOCR enable_mkldnn=False (g
 IZIN KHUSUS sesi 2026-11-13: dijalankan di laptop untuk ukuran ini saja.
 Kunci = exp_date DB: OK beda DB = CEK_VISUAL (cetakan bisa memang beda dari DB).
 Pakai: venv\\Scripts\\python.exe tools/evaluate_tube_exp_paddle.py --set old|new
-Output: testdata_private/tube/paddle_<set>.json (gitignored, resumable)."""
+Input : testdata_private/keys/tube_classify.json (set old) + tube_classify_v2.json.
+Output: testdata_private/runs/tube/paddle_<set>.json (gitignored, resumable)."""
 import argparse
 import json
 import sys
@@ -19,15 +20,19 @@ from paddleocr import PaddleOCR  # noqa: E402
 
 import tube_emboss_pipeline as T  # noqa: E402
 
-D = ROOT / "testdata_private" / "tube"
+sys.path.insert(0, str(ROOT / "tools"))
+from dataset import RUNS, load_key, resolve  # noqa: E402
+
+D = RUNS / "tube"
+D.mkdir(parents=True, exist_ok=True)
 ap = argparse.ArgumentParser()
 ap.add_argument("--set", choices=("old", "new"), required=True)
 ap.add_argument("--limit", type=int, default=0)
 args = ap.parse_args()
 
 OUT = D / f"paddle_{args.set}.json"
-old_ids = {x["id"] for x in json.loads((D / "classify.json").read_text(encoding="utf-8"))}
-items = [x for x in json.loads((D / "classify_v2.json").read_text(encoding="utf-8"))
+old_ids = {x["id"] for x in load_key("tube_classify.json")}
+items = [x for x in load_key("tube_classify_v2.json")
          if x.get("container") == "tube" and x.get("code_on_crimp") and not x.get("error")
          and x.get("db_exp") not in (None, "", "NULL")
          and ((x["id"] in old_ids) if args.set == "old" else (x["id"] not in old_ids))]
@@ -46,7 +51,7 @@ for i, it in enumerate(items, 1):
         continue
     y, m, d = it["db_exp"].split("-")
     base = {"id": it["id"], "db_ddmmyy": d + m + y[2:], "black": bool(it.get("black_mark_over_code"))}
-    img = cv2.imread(it["path"])
+    img = cv2.imread(resolve(it["path"]))
     if img is None:
         res.append({**base, "status": "ERROR", "error": "unreadable"})
         continue

@@ -1,8 +1,10 @@
 """Saring foto coding (packing/startup) yang berisi TUBE, via Qwen di Ollama (GPU).
 
 Satu view 1024px, hanya klasifikasi (bukan baca nilai). Hasil = penyaring awal,
-tetap dicek mata lewat contact sheet. Resumable. Output:
-testdata_private/tube/classify.json  (gitignored)
+tetap dicek mata lewat contact sheet. Resumable. Foto diambil dari
+testdata_private/master (jalankan tools/build_master_dataset.py dulu; foto yang
+dibuang master - hitam/polos/data uji - dilewati). Output:
+testdata_private/keys/tube_classify_v2.json  (gitignored; tube_classify.json hanya dibaca)
 """
 import json, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -10,11 +12,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tools"))
 import cv2  # noqa: E402
 import llm_extract as L  # noqa: E402
+from dataset import KEYS, ROOT as _R, image_path, resolve  # noqa: E402
 
-SRC = Path(r"C:\Users\cosmax\Downloads")
-OUT = ROOT / "testdata_private" / "tube" / "classify.json"
+OUT = KEYS / "tube_classify.json"
 MYSQL = next(Path(r"C:\laragon\bin\mysql").glob("*/bin/mysql.exe"))
 PROMPT = """Look at the main product container in this photo of a cosmetics factory.
 - container: "tube" = squeezable flexible tube with a flat pressed (crimp-sealed) end; "non_tube" = any other container (box, jar, bottle, cap, stick, compact, pump, pouch); "none" = no product container visible.
@@ -37,12 +40,15 @@ rows = subprocess.run([str(MYSQL), "-uroot", "ipc_system", "-B", "-N", "-e", Q],
 items = []
 for r in rows:
     i, st, fl, fp, nb, ex, nm = r.split("\t")
-    items.append(dict(id=int(i), stage=st, label=fl, path=str(SRC / fp), db_no_batch=nb, db_exp=ex, product=nm))
-# Hasil ditulis ke classify_v2.json (classify.json DIBACA saja, jadi eksperimen yang
-# memakainya tidak terganggu). Entri berisi "error" (mis. unreadable karena file waktu itu
-# belum ada, atau terowongan putus) dianggap belum selesai dan dicoba ulang.
+    p = image_path(i)
+    if p:  # None = dibuang master (hitam/polos/data uji/file hilang)
+        items.append(dict(id=int(i), stage=st, label=fl, path=Path(p).relative_to(_R).as_posix(),
+                          db_no_batch=nb, db_exp=ex, product=nm))
+# Hasil ditulis ke tube_classify_v2.json (tube_classify.json DIBACA saja, jadi eksperimen
+# yang memakainya tidak terganggu). Entri berisi "error" (mis. terowongan putus) dianggap
+# belum selesai dan dicoba ulang.
 OLD = OUT
-OUT = OLD.with_name("classify_v2.json")
+OUT = OLD.with_name("tube_classify_v2.json")
 done = {}
 for _src in (OLD, OUT):
     if _src.exists():
@@ -54,7 +60,7 @@ cfg = L._cfg()
 def work(it):
     if it["id"] in done:
         return done[it["id"]]
-    img = cv2.imread(it["path"])
+    img = cv2.imread(resolve(it["path"]))
     if img is None:
         return {**it, "error": "unreadable"}
     try:

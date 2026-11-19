@@ -13,8 +13,8 @@ Dua jenis kunci (JSON {"items": [...]}, path relatif ke root repo):
 Kategori terpenting: WRONG_CONFIDENT (status OK tapi nilai salah = berbahaya).
 
 Contoh:
-  venv\\Scripts\\python.exe tools\\evaluate_coding_print.py --truth testdata_private\\coding_print_truth.json
-  venv\\Scripts\\python.exe tools\\evaluate_coding_print.py --truth testdata_private\\coding_print\\_set2_db.json --out debug_output\\set2.json
+  venv\\Scripts\\python.exe tools\\evaluate_coding_print.py --truth testdata_private\\keys\\coding_truth_set1.json
+  venv\\Scripts\\python.exe tools\\evaluate_coding_print.py --truth testdata_private\\keys\\coding_db_set2.json --out testdata_private\\runs\\set2.json
 
 Foto & kunci produksi ada di testdata_private/ (gitignored) - jangan di-commit.
 """

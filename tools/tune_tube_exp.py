@@ -10,9 +10,9 @@ Opsi yang diukur (akurasi DAN kecepatan):
              karena konsensus butuh SEMUA view sama; hanya menghemat panggilan)
   --parallel view dibaca paralel
 Kunci = exp_date DB: OK beda DB = CEK_VISUAL (cetakan bisa memang beda dari DB).
-Set: old = 175 foto classify.json | new = foto tube berkode crimp BARU di classify_v2.json
-(hold-out: jangan dipakai untuk menyetel).
-Output: testdata_private/tube/tune_<nama>.json (gitignored).
+Set: old = 175 foto keys/tube_classify.json | new = foto tube berkode crimp BARU di
+keys/tube_classify_v2.json (hold-out: jangan dipakai untuk menyetel).
+Output: testdata_private/runs/tube/tune_<nama>.json (gitignored).
 """
 import argparse
 import json
@@ -26,7 +26,11 @@ sys.path.insert(0, str(ROOT))
 import cv2  # noqa: E402
 import llm_extract as L  # noqa: E402
 
-D = ROOT / "testdata_private" / "tube"
+sys.path.insert(0, str(ROOT / "tools"))
+from dataset import RUNS, load_key, resolve  # noqa: E402
+
+D = RUNS / "tube"
+D.mkdir(parents=True, exist_ok=True)
 
 CRIMP_PROMPT = """This is a photo (or close-up crop) of the flat sealed end (crimp) of a cosmetics tube. Characters are EMBOSSED (raised, low contrast, same color as the tube), not printed. The line normally reads "EXP" followed by a 6-digit date DDMMYY, e.g. "EXP 211029" (21 October 2029). Other short codes may sit on the same or other lines - ignore them.
 
@@ -59,8 +63,8 @@ ap.add_argument("--limit", type=int, default=0)
 args = ap.parse_args()
 
 OUT = D / f"tune_{args.name}.json"
-old_ids = {x["id"] for x in json.loads((D / "classify.json").read_text(encoding="utf-8"))}
-allc = json.loads((D / "classify_v2.json").read_text(encoding="utf-8"))
+old_ids = {x["id"] for x in load_key("tube_classify.json")}
+allc = load_key("tube_classify_v2.json")
 items = [x for x in allc if x.get("container") == "tube" and x.get("code_on_crimp") and not x.get("error")
          and x.get("db_exp") not in (None, "", "NULL")
          and ((x["id"] in old_ids) if args.set == "old" else (x["id"] not in old_ids))]
@@ -95,7 +99,7 @@ def work(it):
     y, m, d = it["db_exp"].split("-")
     base = {"id": it["id"], "db_ddmmyy": d + m + y[2:], "black": bool(it.get("black_mark_over_code"))}
     t0 = time.perf_counter()
-    img = cv2.imread(it["path"])
+    img = cv2.imread(resolve(it["path"]))
     if img is None:
         return {**base, "status": "ERROR", "error": "unreadable"}
     crop = img
