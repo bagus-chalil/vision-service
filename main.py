@@ -548,6 +548,7 @@ async def summarize_text(body: SummarizeTextRequest):
 class InsightRequest(BaseModel):
     kind: str
     facts: list[str]
+    language: str = "id"  # id | en | ko; default keeps older consumers unchanged
 
 
 @app.get("/api/insights/kinds")
@@ -563,7 +564,7 @@ async def insight_summarize(body: InsightRequest):
     insights.py, so no consumer ships a prompt of its own. Nothing is stored here. An answer that
     recommends approve/reject/hold is refused (422) so the consumer falls back to its rule-based text."""
     try:
-        text = await run_in_threadpool(insights.summarize, body.kind, body.facts)
+        text = await run_in_threadpool(insights.summarize, body.kind, body.facts, body.language)
     except insights.InsightError as exc:
         return JSONResponse(status_code=400, content={"status": "ERROR", "error": str(exc)})
     except insights.AdvisoryViolation:

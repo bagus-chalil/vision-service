@@ -5,10 +5,13 @@ The Vision Service is the single AI provider: a consumer sends already-prepared,
 prompt, the writing rules and the output check all live here, so every consumer gets the same
 behaviour and a prompt fix is one deploy in one place. Consumers never send a prompt of their own.
 
-Hard rules baked into every kind (see ADVISORY_RULES):
-  * use only the facts that were sent, add nothing;
-  * never recommend a decision (approve / reject / hold). The check in `violates_advisory` rejects
-    an answer that does, so the consumer falls back to its own rule-based text.
+Rules baked into the kinds:
+  * every kind: use only the facts that were sent, add nothing;
+  * kinds about an approval decision (`guard_decisions: True`, with ADVISORY_RULES in their system
+    prompt): never recommend approve / reject / hold. `violates_advisory` rejects an answer that does,
+    so the consumer falls back to its own rule-based text. Kinds that are not about a decision (e.g.
+    `ipc_client_issues`, an admin reading an error log) set `guard_decisions: False`, because there
+    words like "reject" or "hold" are ordinary vocabulary and must not be refused.
 
 Adding a kind = one entry in KINDS. Nothing is stored here.
 """
@@ -19,6 +22,10 @@ import llm_extract
 MAX_FACTS = 40
 MAX_FACT_CHARS = 600
 MAX_TOTAL_CHARS = 8000
+
+# Language the paragraph is written in. The facts may already be in that language; the consumer
+# picks it (default id keeps older consumers working unchanged).
+LANGUAGES = {"id": "Bahasa Indonesia", "en": "English", "ko": "Korean (formal business style)"}
 
 ADVISORY_RULES = (
     "Aturan: pakai HANYA fakta pada daftar yang diberikan; jangan menambah angka, penyebab, atau "
@@ -36,6 +43,35 @@ KINDS = {
             + ADVISORY_RULES
         ),
         "intro": "Hasil pemeriksaan batch:",
+        "guard_decisions": True,
+    },
+    "trial_summary": {
+        "label": "Ringkasan trial untuk approver dan reviewer",
+        "system": (
+            "Kamu membantu approver dan reviewer departemen di pabrik kosmetik membaca ringkasan satu trial validasi. "
+            "Tulis satu paragraf singkat (maksimal sekitar 120 kata), nada netral dan jelas. "
+            "Soroti dulu hasil validasi yang NOT OK dan catatan reviewer yang bukan sekadar 'OK', lalu hal lain yang perlu dicek. "
+            "Hasil weighing yang tidak dilakukan (skip) dan parameter N/A adalah hal biasa, bukan temuan. "
+            + ADVISORY_RULES
+        ),
+        "intro": "Data trial:",
+        "guard_decisions": True,
+    },
+    "ipc_client_issues": {
+        "label": "Analisis log kendala lapangan IPC",
+        "system": (
+            "Kamu membantu admin aplikasi pemeriksaan kualitas pabrik kosmetik (IPC) membaca log kendala dari tablet/HP operator. "
+            "Jawab dalam Bahasa Indonesia, singkat dan konkret (maksimal sekitar 250 kata), dengan format:\n"
+            "1. Ringkasan: satu-dua kalimat tentang pola utama.\n"
+            "2. Per kendala penting (urut dari paling mendesak): dugaan penyebab dan satu langkah cek yang bisa dilakukan admin.\n"
+            "Aturan: gunakan hanya data yang diberikan, jangan mengarang penyebab yang tidak didukung data. "
+            "Jika data belum cukup, katakan apa yang perlu dikumpulkan.\n"
+            "Petunjuk: banyak kejadian dari satu perangkat/browser saja biasanya masalah perangkat atau browser lama. "
+            "Kejadian dengan status offline atau koneksi 2g/slow-2g biasanya jaringan. "
+            "Kejadian di semua perangkat biasanya bug aplikasi atau server."
+        ),
+        "intro": "Data kendala terbuka:",
+        "guard_decisions": False,
     },
 }
 
@@ -47,6 +83,18 @@ _RECOMMEND = re.compile(
     r"\W+(?:\w+\W+){0,3}?"
     r"(approve|di-?approve|approved|reject|di-?reject|rejected|hold|di-?hold|disetujui|setujui|menyetujui|ditolak|tolak|menolak)",
     re.IGNORECASE,
+)
+
+# English / Korean equivalents (the facts and answer may be written in those languages).
+_RECOMMEND_EN = re.compile(
+    r"\b(recommend\w*|should|suggest\w*|advis\w*|better\s+to|ought\s+to)\b"
+    r"\W+(?:\w+\W+){0,3}?"
+    r"(approv\w*|reject\w*|hold|declin\w*)",
+    re.IGNORECASE,
+)
+_RECOMMEND_KO = re.compile(
+    r"(승인|반려|보류|거절)\S*\s*(?:\S+\s+){0,2}?(권장|권고|추천|바람직|하는\s*것이\s*좋|해야)"
+    r"|(권장|권고|추천)\S*\s*(?:\S+\s+){0,2}?(승인|반려|보류|거절)",
 )
 
 
@@ -73,26 +121,32 @@ def clean_facts(facts):
     return cleaned
 
 
-def build_prompt(kind, facts):
+def build_prompt(kind, facts, language="id"):
     cfg = KINDS.get(kind)
     if cfg is None:
         raise InsightError(f"kind tidak dikenal: {kind}")
+    if language not in LANGUAGES:
+        raise InsightError(f"language tidak dikenal: {language}")
     body = "\n".join(f"- {f}" for f in clean_facts(facts))
-    return cfg["system"], f"{cfg['intro']}\n{body}"
+    system = cfg["system"]
+    if language != "id":
+        system += f" Tulis jawaban dalam {LANGUAGES[language]}."
+    return system, f"{cfg['intro']}\n{body}"
 
 
 def violates_advisory(text):
-    return bool(_RECOMMEND.search(text or ""))
+    text = text or ""
+    return bool(_RECOMMEND.search(text) or _RECOMMEND_EN.search(text) or _RECOMMEND_KO.search(text))
 
 
-def summarize(kind, facts):
+def summarize(kind, facts, language="id"):
     """Returns the written paragraph. Raises InsightError (bad request), llm_extract.LlmUnavailable
     (Ollama down, propagates) or AdvisoryViolation (the model recommended a decision)."""
-    system, prompt = build_prompt(kind, facts)
+    system, prompt = build_prompt(kind, facts, language)
     text = llm_extract.chat_text(system, prompt)
     if not text.strip():
         raise llm_extract.LlmUnavailable("jawaban kosong")
-    if violates_advisory(text):
+    if KINDS[kind].get("guard_decisions", True) and violates_advisory(text):
         raise AdvisoryViolation(text)
     return text.strip()
 

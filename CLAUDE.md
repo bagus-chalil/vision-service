@@ -849,11 +849,22 @@ Endpoint `main.py`:
       diikuti kata keputusan dalam beberapa kata); menyebut keputusan yang sudah tercatat ("Packing: Hold")
       tidak kena. Regex-nya heuristik: kalau ada false positive di lapangan, perbaiki di `insights.py`
       + `tests/test_insights.py`, jangan dimatikan.
-    - Menambah kind baru = satu entri di `KINDS` (`system`, `intro`, `label`) + satu kasus di
-      `tests/test_insights.py`. Saat ini ada `ipc_batch_summary` (ringkasan batch untuk approver IPC).
-    - Endpoint lama `/api/summarize-text` (prompt dikirim consumer) TETAP ada untuk `ClientIssueAnalyzer`
-      ipc_app ("Analisis AI" log kendala); belum dipindah ke kind, pindahkan bila perlu supaya prompt-nya
-      juga terpusat di sini.
+    - Menambah kind baru = satu entri di `KINDS` (`system`, `intro`, `label`, `guard_decisions`) + satu kasus di
+      `tests/test_insights.py`. Kind yang ada (2026-11-20): `ipc_batch_summary` (ringkasan batch untuk approver
+      IPC), `ipc_client_issues` (analisis log kendala lapangan IPC, pindahan dari `ClientIssueAnalyzer::SYSTEM`),
+      `trial_summary` (ringkasan trial untuk approver + reviewer di new_trial_validation_app).
+    - **`guard_decisions` per kind:** `ADVISORY_RULES` + pemeriksaan `violates_advisory` hanya untuk kind yang
+      soal keputusan approval (`ipc_batch_summary`, `trial_summary`). `ipc_client_issues` memakai
+      `guard_decisions: False` dan system prompt-nya TANPA `ADVISORY_RULES`, karena di log kendala kata
+      "reject"/"hold" kosakata biasa. Jangan dimatikan global.
+    - **`language` (opsional, `id`|`en`|`ko`, default `id`):** body `{"kind","facts","language"}`. Selain `id`,
+      system prompt ditambah "Tulis jawaban dalam <bahasa>". Consumer lama yang tidak mengirim `language`
+      tidak berubah. Bahasa tak dikenal = 400. `violates_advisory` kini juga punya pola Inggris dan Korea
+      (heuristik, sama statusnya dengan yang Indonesia: perbaiki di `insights.py` + tes bila ada false positive).
+    - Endpoint lama `/api/summarize-text` (prompt dikirim consumer) **DEPRECATED** sejak 2026-11-20: tidak ada
+      consumer yang memakainya lagi di repo ini (ipc_app sudah pindah ke `ipc_client_issues`). Sengaja belum
+      dihapus karena Vision Service harus di-deploy lebih dulu; hapus hanya setelah deploy terkonfirmasi
+      dan user meminta.
     - Tes: `LOAD_PADDLEOCR=0 python tests/test_insights.py` (Ollama di-mock).
     - Urutan deploy: Vision Service DULU, baru consumer. Consumer yang memanggil sebelum Vision Service
       diperbarui mendapat 404 dan menampilkan "Vision Service belum diperbarui" (poin ringkasan berbasis
