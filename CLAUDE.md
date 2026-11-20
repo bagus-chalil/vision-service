@@ -834,6 +834,31 @@ Endpoint `main.py`:
     - **Belum:** ipc_app masih memanggil `coding_print`/`tube_exp_date`/`tube_exp_llm`; integrasi butuh
       ipc_app kirim `field_type=coding_formula` + formula SKU (master produk) + foto ke-2. Belum di-commit.
 
+25. **`/api/insights/summarize` — Vision Service sebagai SATU-SATUNYA penyedia AI teks untuk semua aplikasi (2026-11-20).**
+    Aplikasi consumer (ipc_app, new_trial_validation_app, nanti yang lain) TIDAK mengirim prompt. Mereka
+    mengirim `kind` + `facts` (list kalimat polos yang sudah mereka hitung sendiri dan sudah dianonimkan),
+    dan menerima satu paragraf. Prompt, aturan menulis, dan pemeriksaan keluaran ada di `insights.py`,
+    jadi perbaikan prompt = satu deploy di satu tempat, perilaku sama untuk semua aplikasi.
+    - Kontrak: `POST /api/insights/summarize` body `{"kind": "...", "facts": ["...", ...]}` ->
+      `200 {"status":"OK","kind":"...","text":"..."}`. `400` = kind tak dikenal / facts kosong atau terlalu
+      besar (maks 40 fakta, 600 karakter per fakta, 8000 total). `422` = jawaban LLM menyarankan keputusan
+      (ditolak, consumer harus jatuh ke teks berbasis aturannya sendiri). `503` = Ollama tak tersedia.
+      `GET /api/insights/kinds` mendaftar kind yang tersedia.
+    - Aturan keras di setiap kind (`ADVISORY_RULES`): pakai HANYA fakta yang dikirim, jangan mengarang, dan
+      JANGAN menyarankan approve/reject/hold. `violates_advisory()` memeriksa keluaran (kata rekomendasi
+      diikuti kata keputusan dalam beberapa kata); menyebut keputusan yang sudah tercatat ("Packing: Hold")
+      tidak kena. Regex-nya heuristik: kalau ada false positive di lapangan, perbaiki di `insights.py`
+      + `tests/test_insights.py`, jangan dimatikan.
+    - Menambah kind baru = satu entri di `KINDS` (`system`, `intro`, `label`) + satu kasus di
+      `tests/test_insights.py`. Saat ini ada `ipc_batch_summary` (ringkasan batch untuk approver IPC).
+    - Endpoint lama `/api/summarize-text` (prompt dikirim consumer) TETAP ada untuk `ClientIssueAnalyzer`
+      ipc_app ("Analisis AI" log kendala); belum dipindah ke kind, pindahkan bila perlu supaya prompt-nya
+      juga terpusat di sini.
+    - Tes: `LOAD_PADDLEOCR=0 python tests/test_insights.py` (Ollama di-mock).
+    - Urutan deploy: Vision Service DULU, baru consumer. Consumer yang memanggil sebelum Vision Service
+      diperbarui mendapat 404 dan menampilkan "Vision Service belum diperbarui" (poin ringkasan berbasis
+      aturan tetap tampil).
+
 ## Infra: CI/CD pilot ke VPS (jangan re-discover ini lagi)
 
 Ini jalur **terpisah** dari deploy manual on-prem `.24` di atas — dipakai

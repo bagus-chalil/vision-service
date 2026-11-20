@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import coding_formula
+import insights
 import llm_extract
 import tube_emboss_pipeline
 
@@ -542,6 +543,37 @@ async def summarize_text(body: SummarizeTextRequest):
     except llm_extract.LlmUnavailable as exc:
         return JSONResponse(status_code=503, content={"status": "ERROR", "error": f"Ollama tidak tersedia: {exc}"})
     return {"status": "OK", "text": text}
+
+
+class InsightRequest(BaseModel):
+    kind: str
+    facts: list[str]
+
+
+@app.get("/api/insights/kinds")
+def insight_kinds():
+    """Which insight kinds this build can write (a consumer can check before showing its button)."""
+    return {"kinds": insights.kinds()}
+
+
+@app.post("/api/insights/summarize")
+async def insight_summarize(body: InsightRequest):
+    """Typed text insight for consumer apps (ipc_app, new_trial_validation_app). The consumer sends
+    its own already-anonymised FACTS and a `kind`; the prompt, writing rules and output check live in
+    insights.py, so no consumer ships a prompt of its own. Nothing is stored here. An answer that
+    recommends approve/reject/hold is refused (422) so the consumer falls back to its rule-based text."""
+    try:
+        text = await run_in_threadpool(insights.summarize, body.kind, body.facts)
+    except insights.InsightError as exc:
+        return JSONResponse(status_code=400, content={"status": "ERROR", "error": str(exc)})
+    except insights.AdvisoryViolation:
+        return JSONResponse(
+            status_code=422,
+            content={"status": "ERROR", "error": "jawaban AI melanggar aturan advisory (menyarankan keputusan), ditolak"},
+        )
+    except llm_extract.LlmUnavailable as exc:
+        return JSONResponse(status_code=503, content={"status": "ERROR", "error": f"Ollama tidak tersedia: {exc}"})
+    return {"status": "OK", "kind": body.kind, "text": text}
 
 
 @app.get("/api/tube-emboss/field-types")
