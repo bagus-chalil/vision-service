@@ -352,7 +352,13 @@ IM_SCHEMA = {
 }
 
 # Flag only: IM number looks like "IM-<something>"; never edits the value.
-IM_NUMBER_FORMAT = re.compile(r"^IM-\S.*$")
+IM_NUMBER_FORMAT = re.compile(r"^IM[\s\-]*\S.*$", re.I)
+
+
+def _im_key(value):
+    """Voting key for the IM number: only letters/digits count, so '-' vs ' ' vs ' - ' between
+    views (the same printed number read with different spacing) is not a disagreement."""
+    return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
 # raw_text must literally contain the claimed numbers (flag: model did not invent them)
 _SHELF_YEARS = re.compile(r"(\d+)\s*Tahun", re.I)
 _SHELF_MONTHS = re.compile(r"(\d+)\s*bulan", re.I)
@@ -407,10 +413,23 @@ def _build_im_result(views, attempts, bodies, elapsed):
         return v if (v is not None and v.strip()) else None
 
     primary = views[0]
-    im_number = norm(primary["im_number"])
+    # Nomor IM: suara mayoritas (keputusan user 2026-11-23). Satu view yang salah
+    # baca satu huruf (mis. "NUP PURE" vs "NUR NPURE") tidak lagi membatalkan
+    # bacaan yang 3 view lainnya sepakati. Syarat sama dengan umur simpan:
+    # minimal 3 view memilih nilai yang sama (dan legible), paling banyak 1 view
+    # berbeda/kosong. Nilai yang dipakai = teks view pertama yang ikut pemenang.
+    im_votes = {}
+    for v in views:
+        key = _im_key(v["im_number"])
+        if key and v["legible"]["im_number"]:
+            im_votes.setdefault(key, []).append(v)
+    winner_key, winners = max(im_votes.items(), key=lambda kv: len(kv[1]), default=(None, []))
+    im_majority = len(winners) >= 3 and len(views) - len(winners) <= 1
+    im_source = winners[0] if im_majority else primary
+    im_number = norm(im_source["im_number"])
     shelf = primary["shelf_life"]
     legible = {
-        "im_number": bool(primary["legible"]["im_number"]) and im_number is not None,
+        "im_number": bool(im_source["legible"]["im_number"]) and im_number is not None,
         "shelf_life": bool(primary["legible"]["shelf_life"]) and len(shelf) > 0,
     }
     # Umur simpan: yang menentukan EXP hanya NILAI (tahun/bulan), bukan label
@@ -429,8 +448,7 @@ def _build_im_result(views, attempts, bodies, elapsed):
     voting = [v for v in views if v["shelf_life"]]
     all_values = set().union(*(value_set(v["shelf_life"]) for v in voting)) if voting else set()
     agree = {
-        "im_number": im_number is not None
-        and all(norm(v["im_number"]) == im_number and v["legible"]["im_number"] for v in views),
+        "im_number": im_number is not None and im_majority,
         "shelf_life": len(voting) >= 3
         and len(views) - len(voting) <= 1
         and all(v["legible"]["shelf_life"] for v in voting)
@@ -461,6 +479,8 @@ def _build_im_result(views, attempts, bodies, elapsed):
         "format_ok": format_ok,
         "view_agreement": agree,
         "views_read": [{"im_number": v["im_number"], "shelf_life": v["shelf_life"]} for v in views],
+        # berapa view yang sepakat dengan im_number terpilih (info untuk ipc_app / evaluasi)
+        "im_number_votes": {"agree": len(winners), "views": len(views)},
         "confidence": confidence,
         "status": status,
         "engine_used": "ollama",
