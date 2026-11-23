@@ -1200,6 +1200,16 @@ dalam scope pilot ini, lihat catatan "local prototype" di atas), dan
       "AI makin pintar" di `docs/ai-learning-plan.md`): label_bulk 63/150 OK,
       im_document 21/150 OK; view 640 px DIPUTUSKAN dipertahankan; 1 kemungkinan
       false OK (foto 1505). Foto produksi baru sudah disalin ke `testdata_private/`.
+- [x] Voting mayoritas `im_number` di `im_document` (2026-11-23, commit `fb51439` + test
+      `0630aaa`): kasus nyata batch 911/914 ipc_app, bacaan benar tapi 1 dari 4 view salah
+      1 huruf (`NUP PURE`, `KKl`) -> dulu `view_agreement=false` -> tidak dipercaya.
+      `_build_im_result` kini memilih nilai dengan suara terbanyak (kunci `_im_key` =
+      huruf+angka saja, spasi/`-`/besar-kecil diabaikan): dipercaya bila >= 3 view
+      legible sepakat dan paling banyak 1 view berbeda/kosong (aturan yang sama dengan
+      umur simpan); `im_number` diambil dari view pemenang; respons baru
+      `im_number_votes {agree, views}`. Test: `python tests/test_im_vote.py` (data view asli).
+      **Perlu restart/deploy** agar berlaku; ipc_app membaca ulang hanya untuk foto baru.
+      Sisi ipc_app: bacaan meragukan tetap diisikan tanpa kunci, Nomor IM disimpan huruf besar.
 - [ ] Startup AI Cross-Check sisa: putuskan view 640 px, user cek 2 item
       `_verify`, selidiki 5 foto WhatsApp ERROR, kunci jawaban IM lebih
       banyak, daftar field_type baru di `ipc_app/config/vision.php`
