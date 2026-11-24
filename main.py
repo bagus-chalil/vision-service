@@ -320,11 +320,14 @@ LLM_FIELD_TYPES = {
 }
 
 
-def run_llm_pipeline(image, field_type, request_id):
+def run_llm_pipeline(image, field_type, request_id, user_hint=None):
     """Document field_types read by the Ollama vision LLM (no PaddleOCR).
-    Returns raw values + legibility + status only - never PASS/FAIL."""
+    Returns raw values + legibility + status only - never PASS/FAIL.
+    user_hint: optional operator text that only steers where/how to read (llm_extract.hint_scope)."""
     start = time.time()
-    result = LLM_FIELD_TYPES[field_type]["fn"](image)
+    with llm_extract.hint_scope(user_hint):
+        result = LLM_FIELD_TYPES[field_type]["fn"](image)
+    result["user_hint_used"] = llm_extract.sanitize_hint(user_hint)
     result["field_type"] = field_type
     result["request_id"] = request_id
     result["pipeline"] = "llm"
@@ -423,10 +426,12 @@ def resolve_coding_formula(raw):
     return segments, "sku"
 
 
-def run_coding_formula_pipeline(images, segments, request_id, formula_source="sku"):
+def run_coding_formula_pipeline(images, segments, request_id, formula_source="sku", user_hint=None):
     start = time.time()
     required = ["batch", "exp"] if formula_source == "auto" else None
-    result = llm_extract.analyze_coding_formula(images, segments, required=required)
+    with llm_extract.hint_scope(user_hint):
+        result = llm_extract.analyze_coding_formula(images, segments, required=required)
+    result.update(user_hint_used=llm_extract.sanitize_hint(user_hint))
     result.update(field_type=CODING_FORMULA_FIELD, request_id=request_id, pipeline="llm",
                   formula_source=formula_source,
                   processing_time_ms=round((time.time() - start) * 1000, 1))
@@ -473,6 +478,7 @@ async def analyze(
     reference_date: str = Form(None),
     coding_formula_spec: str = Form(None, alias="coding_formula"),
     file2: UploadFile = File(None),
+    user_hint: str = Form(None),
 ):
     """Single entrypoint for index.html: looks up field_type's pipeline in
     emboss_format_patterns.json vs field_patterns.json and dispatches to the
@@ -504,14 +510,14 @@ async def analyze(
                 return DECODE_ERROR
             images.append(image2)
         return await run_in_threadpool(
-            run_coding_formula_pipeline, images, segments, request_id or str(uuid.uuid4()), formula_source
+            run_coding_formula_pipeline, images, segments, request_id or str(uuid.uuid4()), formula_source, user_hint
         )
 
     if field_type in LLM_FIELD_TYPES:
         # LLM jalur (Ollama GPU). Panggilan HTTP-nya blocking dan lama (beberapa
         # detik), jadi dilempar ke threadpool supaya event loop tidak tertahan
         # (gotcha #16; jalur OCR kini juga di threadpool lewat run_ocr_path).
-        return await run_in_threadpool(run_llm_pipeline, image, field_type, request_id or str(uuid.uuid4()))
+        return await run_in_threadpool(run_llm_pipeline, image, field_type, request_id or str(uuid.uuid4()), user_hint)
 
     is_tube_emboss = bool(field_type) and field_type in tube_emboss_pipeline.load_emboss_format_patterns()
     if is_tube_emboss:
